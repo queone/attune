@@ -1,0 +1,6 @@
+kind: roleAssignment
+principal: example-readers
+principalType: group
+role: Example DNS Reader
+scope:
+  subscription: 00000000-0000-0000-0000-000000000001

@@ -1,0 +1,10 @@
+provider: azure
+specs: specs
+azure:
+  subscription: 00000000-0000-0000-0000-000000000001
+  resource_group: example-resources
+prune:
+  dns: true
+  identities: false
+  roles: false
+  resource_groups: false

@@ -1,0 +1,13 @@
+# Replace every placeholder and review all prune settings before a live command.
+provider: azure
+specs: specs
+# Optional declared spec content version, printed in validate and grounding output.
+content_version: v0.1.0
+azure:
+  subscription: 00000000-0000-0000-0000-000000000000
+  resource_group: example-attune-resources
+prune:
+  dns: false
+  identities: false
+  roles: false
+  resource_groups: false

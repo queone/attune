@@ -1,0 +1,11 @@
+# Review permissions and scope against the intended least-privilege policy.
+kind: roleDefinition
+name: Example Attune DNS Reader
+description: Read synthetic DNS resources used by the attune example.
+assignableScopes:
+  - subscription: 00000000-0000-0000-0000-000000000000
+actions:
+  - Microsoft.Network/dnsZones/read
+notActions: []
+dataActions: []
+notDataActions: []

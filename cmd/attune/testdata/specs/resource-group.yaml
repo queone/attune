@@ -1,0 +1,5 @@
+kind: resourceGroup
+name: example-resources
+location: eastus
+tags:
+  purpose: example

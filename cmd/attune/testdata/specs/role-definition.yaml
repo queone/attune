@@ -1,0 +1,10 @@
+kind: roleDefinition
+name: Example DNS Reader
+description: Read fictional DNS resources.
+assignableScopes:
+  - subscription: 00000000-0000-0000-0000-000000000001
+actions:
+  - Microsoft.Network/dnsZones/read
+notActions: []
+dataActions: []
+notDataActions: []

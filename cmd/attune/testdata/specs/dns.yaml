@@ -1,0 +1,7 @@
+kind: dnsRecordSet
+zone: example.com
+type: A
+name: www
+ttl: 300
+values:
+  - 192.0.2.10

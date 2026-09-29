@@ -1,0 +1,7 @@
+# The named principal refers to the synthetic group in this example bundle.
+kind: roleAssignment
+principal: example-attune-readers
+principalType: group
+role: Example Attune DNS Reader
+scope:
+  subscription: 00000000-0000-0000-0000-000000000000

@@ -1,0 +1,5 @@
+# Add reviewed directory object IDs only after choosing a real target.
+kind: securityGroup
+name: example-attune-readers
+owners: []
+members: []

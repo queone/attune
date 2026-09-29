@@ -1,0 +1,6 @@
+kind: securityGroup
+name: example-readers
+owners:
+  - 00000000-0000-0000-0000-000000000002
+members:
+  - 00000000-0000-0000-0000-000000000003

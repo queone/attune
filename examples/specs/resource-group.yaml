@@ -1,0 +1,6 @@
+# Replace the name, location, and tags before targeting a real subscription.
+kind: resourceGroup
+name: example-attune-resources
+location: eastus
+tags:
+  purpose: synthetic-example
