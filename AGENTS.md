@@ -554,8 +554,9 @@ Note: the Director triggers those actions; Ratify names what is pending.
 - Label each acceptance test with source axis (`[Automated]` / `[Manual]`) and timing axis (`[Pre-release gate]` default; `[Post-release verification]` explicit). See `govna/ac-template.md`.
 - Name test identifiers, output labels, comments, and errors by behavior.
 - Reserve bare AC and AT identifiers for CHANGELOG rows, commit messages, active `govna/ac<N>-<slug>.md` documents, literal examples in `govna/ac-template.md`, and `Historical:` comments.
-- Reserve bare Class, Part, and Round identifiers for CHANGELOG rows, commit messages, and `Historical:` comments.
-- Reserve bare IE identifiers for CHANGELOG rows, commit messages, `plan.md`'s own `IE<N>:` bullets, and `Historical:` comments.
+- Reserve bare Class and Round identifiers for CHANGELOG rows, commit messages, and `Historical:` comments.
+- Reserve bare Part identifiers for CHANGELOG rows, commit messages, active `govna/ac<N>-<slug>.md` documents, and `Historical:` comments.
+- Reserve bare IE identifiers for CHANGELOG rows, commit messages, active `govna/ac<N>-<slug>.md` documents, `plan.md`'s own `IE<N>:` bullets, and `Historical:` comments.
 - Treat every other Markdown documentation file as out of bounds for bare AC, AT, Class, Part, Round, and IE identifiers.
 - Use the `Historical:` prefix only for a relevant shipped-AC comment.
 - Delete an irrelevant shipped-AC reference.

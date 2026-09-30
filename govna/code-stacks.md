@@ -41,8 +41,13 @@
 - Run dependency tidying, formatting, fixes, vetting, tests with coverage, staticcheck, and compilation.
 - Install command binaries into `$(go env GOPATH)/bin`.
 - Bump the single detected `programVersion` during release prep.
+- Derive the primary utility name from the `go.mod` module path without its major-version suffix.
+- Reject a release tag at v2 or later when the `go.mod` module path lacks the matching `/v<major>` suffix.
+- Accept a repository with no commits during release prep.
+- Capture the candidate Git tree during a release-prep dry run.
 - Accept command names for scoped builds while retaining package-wide shared validation.
 - Capture the complete candidate Git tree without changing the repository index.
+- Create the first commit during release in a repository with no commits.
 - Display the candidate files and exact release sequence before approval.
 - Reject a changed candidate tree after approval.
 - Verify the staged and committed trees against the approved candidate.

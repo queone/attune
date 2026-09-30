@@ -93,7 +93,7 @@ Note: the operator flow has two steps.
 `./build.sh prep` performs release bookkeeping in every CODE stack. Go and Terraform prep perform bookkeeping only. Rust prep adds a fallback pre-change full build when validation evidence is missing or stale and one post-change full build after its writes. Swift prep runs the canonical build before its writes and again with installation after them unless `-B` skips both. Every stack follows these bookkeeping phases:
 
 1. **Validate inputs.** Require strict stable SemVer and one non-empty, single-line, table-safe message of no more than 80 bytes.
-2. **Validate git state.** Inside a git work tree, target tag does not exist yet, HEAD is not at the latest tag with a clean working tree.
+2. **Validate git state.** Inside a git work tree, target tag does not exist yet, HEAD is not at the latest tag with a clean working tree. Go accepts a repository with no commits.
 3. **Process version targets.**
    - Detect every version target.
    - Validate every version target.

@@ -981,7 +981,7 @@ _release_signal_exit() { # $1=conventional signal exit status
 }
 
 _rel_run_inner() {
-  local tag="$1" message="$2" candidate_tree approved_head retry=0 status
+  local tag="$1" message="$2" candidate_tree approved_head='' base_tree retry=0 status
   _rel_tag_for_recovery="$tag"
 
   _ensure_git_repo || return 1
@@ -991,17 +991,27 @@ _rel_run_inner() {
     _failure 'release: inspect index and working tree failed'
     return 1
   }
-  approved_head=$(git rev-parse HEAD 2>/dev/null) || {
-    _failure 'release: resolve HEAD failed'
-    return 1
-  }
-  if [ -z "$status" ]; then
+  # A repository with no commits has no HEAD: the release creates the first
+  # commit, so the candidate is compared with the empty tree and never retried.
+  if _head_is_unborn; then
+    base_tree=$(_empty_tree) || {
+      _failure 'release: resolve the empty tree failed; check the Git installation and retry'
+      return 1
+    }
+  else
+    approved_head=$(git rev-parse HEAD 2>/dev/null) || {
+      _failure 'release: resolve HEAD failed'
+      return 1
+    }
+    base_tree=$(git rev-parse 'HEAD^{tree}' 2>/dev/null) || base_tree=''
+  fi
+  if [ -n "$approved_head" ] && [ -z "$status" ]; then
     if [ "$(git show -s --format=%B HEAD 2>/dev/null)" != "$message" ]; then
       _failure 'release: clean tree is not a retry because the full HEAD commit message differs from the release message'
       return 1
     fi
     retry=1
-  elif [ "$candidate_tree" = "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" ]; then
+  elif [ "$candidate_tree" = "$base_tree" ]; then
     _failure 'release: no candidate tree changes are available to commit'
     return 1
   fi
@@ -1012,9 +1022,12 @@ _rel_run_inner() {
   if [ "$retry" -eq 1 ]; then
     printf '%s\n' "$(yel7 "$(printf '\nRetry commit files:')")"
     git diff-tree --no-commit-id --name-status -r HEAD || return 1
-  else
+  elif [ -n "$approved_head" ]; then
     printf '%s\n' "$(yel7 "$(printf '\nCandidate tree files:')")"
     git diff --name-status HEAD "$candidate_tree" || return 1
+  else
+    printf '%s\n' "$(yel7 "$(printf '\nCandidate tree files:')")"
+    git diff --name-status "$base_tree" "$candidate_tree" || return 1
   fi
 
   printf '%s\n' "$(yel7 "$(printf '\nrelease sequence:')")"
@@ -1093,13 +1106,28 @@ _rel_run_inner() {
   _rel_step 'git push branch' "$completed" push origin || return 1
 }
 
+# _head_is_unborn — succeed when the current branch has no commit yet.
+_head_is_unborn() {
+  local ref
+  ref=$(git symbolic-ref -q HEAD 2>/dev/null) || return 1
+  ! git rev-parse -q --verify "$ref" >/dev/null 2>&1
+}
+
+# _empty_tree — print the ID of the tree with no entries.
+_empty_tree() {
+  git hash-object -t tree /dev/null 2>/dev/null
+}
+
 _capture_worktree_tree() { # $1=temporary index path $2=error prefix (optional)
   local index="$1" prefix="${2:-release}" tree
   rm -f -- "$index"
-  GIT_INDEX_FILE="$index" git read-tree HEAD >/dev/null 2>&1 || {
-    _failure "$prefix: initialize temporary candidate index failed"
-    return 1
-  }
+  # A repository with no commits starts from an empty temporary index.
+  if ! _head_is_unborn; then
+    GIT_INDEX_FILE="$index" git read-tree HEAD >/dev/null 2>&1 || {
+      _failure "$prefix: initialize temporary candidate index failed"
+      return 1
+    }
+  fi
   GIT_INDEX_FILE="$index" git add -A -- . >/dev/null 2>&1 || {
     _failure "$prefix: capture candidate files in temporary index failed"
     return 1
@@ -1418,8 +1446,9 @@ _prep_run_inner() {
   fi
   _validate_release_message prep "$message" || return 1
 
-  # Phase 2: validate git state.
+  # Phase 2: validate git state and the Go module major version.
   _prep_validate_git_state "$root" "$version" || return 1
+  _prep_validate_module_major "$root" "$version" || return 1
 
   if [ -n "${GOVNA_PREP_VALIDATION_TOKEN:-}" ]; then
     printf 'prep: validation-token environment evidence is unsupported for Go\n' >&2
@@ -1451,15 +1480,18 @@ _prep_run_inner() {
   local ielines
   ielines=$(_prep_find_ie_lines "$root" "$acnums")
 
+  # Phase 6: capture the pre-write tree. The dry run captures it too, so a dry
+  # run cannot pass where prep fails at capture.
+  local before_tree after_tree expected_paths actual_paths
+  before_tree=$(_capture_worktree_tree "$_prep_owned_dir/before.index" prep) || return 1
+
   if [ "$dry" -eq 1 ]; then
     _prep_print_dry_run "$vtargets" "$ctargets" "$vstripped" "$message" "$acfiles" "$ielines"
     _prep_emit_release_command "$version" "$message"
     return 0
   fi
 
-  # Phase 6: capture the pre-write tree and the exact planned path set.
-  local before_tree after_tree expected_paths actual_paths
-  before_tree=$(_capture_worktree_tree "$_prep_owned_dir/before.index" prep) || return 1
+  # Phase 6b: record the exact planned path set.
   expected_paths=$(_prep_expected_paths "$root" "$vtargets" "$ctargets" "$acfiles" "$ielines")
   _prep_prepare_expected_files "$root" "$vtargets" "$ctargets" "$vstripped" "$message" "$ielines" || return 1
 
@@ -1578,20 +1610,57 @@ _prep_validate_git_state() { # $1=root $2=version
   fi
 }
 
-_prep_module_basename() { # $1=root -> module basename or empty
-  local root="$1" line modpath
+_prep_module_path() { # $1=root -> go.mod module path as declared, or empty
+  local root="$1" line
   [ -f "$root/go.mod" ] || { printf ''; return; }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
     module\ * | module"$(printf '\t')"*)
-      modpath=$(_trim "${line#module}")
-      [ -z "$modpath" ] && { printf ''; return; }
-      printf '%s' "${modpath##*/}"
+      printf '%s' "$(_trim "${line#module}")"
       return
       ;;
     esac
   done <"$root/go.mod"
   printf ''
+}
+
+# _prep_strip_module_major PATH — drop a trailing major-version segment, with
+# the same rule as _module_path.
+_prep_strip_module_major() {
+  local modpath="$1"
+  case "$modpath" in
+  */v[1-9] | */v[1-9][0-9] | */v[1-9][0-9][0-9]) modpath=${modpath%/*} ;;
+  esac
+  printf '%s' "$modpath"
+}
+
+_prep_module_basename() { # $1=root -> module basename without its major-version suffix, or empty
+  local modpath
+  modpath=$(_prep_strip_module_major "$(_prep_module_path "$1")")
+  printf '%s' "${modpath##*/}"
+}
+
+# _prep_validate_module_major ROOT VERSION — Go rejects a v2-or-later tag unless
+# the module path ends in the matching /v<major> segment. A repository without
+# a go.mod module line passes.
+_prep_validate_module_major() { # $1=root $2=version (vMAJOR.MINOR.PATCH)
+  local root="$1" version="$2" major modpath required
+  major="${version#v}"
+  major="${major%%.*}"
+  [ "$major" -ge 2 ] || return 0
+  modpath=$(_prep_module_path "$root")
+  [ -n "$modpath" ] || return 0
+  case "$modpath" in
+  */v"$major") return 0 ;;
+  esac
+  required="$(_prep_strip_module_major "$modpath")/v$major"
+  {
+    printf 'prep: tag %s requires go.mod module path %s; go.mod declares %s\n' "$version" "$required" "$modpath"
+    printf '  Go rejects a v%s tag unless the module path ends in /v%s\n' "$major" "$major"
+    printf '  to release %s: set the go.mod module line to %s and update its imports\n' "$version" "$required"
+    printf '  to keep %s: choose a v0 or v1 tag; go install %s/...@latest still resolves\n' "$modpath" "$modpath"
+  } >&2
+  return 1
 }
 
 # _prep_detect_version_targets ROOT — prints "path<TAB>kind" lines; sets
