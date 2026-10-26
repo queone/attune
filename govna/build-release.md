@@ -58,7 +58,6 @@ Run `./build.sh` without targets for repository-wide validation. Follow the appl
 ## Pre-Release Checklist
 
 - Apply this checklist only to an explicit Director Package instruction for an established Ratified release batch or direct batch.
-- Apply the Package gates in `AGENTS.md` `### Four-Phase Workflow` and `### Phase-Advancement Rules` before prep.
 
 Note: the operator flow has two steps.
 
@@ -68,8 +67,6 @@ Note: the operator flow has two steps.
    - Name each direct-handled companion change inside that user-visible result without an AC reference.
    - Keep the release message on one line and inside one Markdown table cell.
    - Exclude every AC reference outside the established release batch.
-   - Use the successful final full build and clean Ratify review as current Package evidence.
-   - Use the successful final full build as current Package evidence for a direct batch.
    - Rerun applicable validation before prep when Package evidence is missing or stale.
    - Run the stack-defined `./build.sh prep vX.Y.Z "message"` invocation.
    - Pass current validation evidence with `--validation-token` or `-t` when supported.
@@ -83,6 +80,7 @@ Note: the operator flow has two steps.
    - Run `./build.sh vX.Y.Z "message"`.
    - Confirm the displayed candidate files and exact release sequence.
    - Approve the interactive prompt to commit, compile, validate, install, tag, and push.
+   - Append `--yes` or `-y` to skip that prompt only for an agent-run release under `AGENTS.md` `### Agent Release`.
 
 - End the structured Package completion report with `Run below to release:`.
 - Place the exact release command immediately after that line.

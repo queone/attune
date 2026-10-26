@@ -47,8 +47,6 @@ Keep repo-specific practices in `## Project Practices`.
 - Provide a recovery action when the user can recover.
 - Treat static analysis and linting errors as build failures.
 - Validate installable-target declarations before compiling or installing them.
-- Follow the applicable stack guidance for release-prep evidence, validation ordering, and build-state reuse.
-- Pass release-prep evidence through the applicable stack's canonical CLI option.
 
 ## Testing Expectations
 
@@ -118,11 +116,11 @@ Note: colors are xterm-256 index 231 with bold for the name and headings (one se
 - Declare a non-empty `const programVersion` string literal in every installable `cmd/<name>/main.go`.
 - Validate every `programVersion` declaration through `build.sh` before compiling installable binaries.
 - Pin `staticcheck` to the repository-governed version and invoke the pinned installation path directly.
-- Treat `go vet` and `staticcheck` findings as build failures.
+- Bump the `go.mod` `go` directive and the `staticcheck` pin together, after the `staticcheck` release notes name the new Go version.
+- Build with the Go toolchain that `go.mod` declares.
 - Scan all `.go` and `.go.tmpl` files for stale import paths after a module rename.
 
 ## Project Practices
 
-- Follow existing repo patterns unless an approved improvement says otherwise.
 - Render attune's help through the `github.com/queone/gkit/help` package.
 - Print `github.com/queone/attune` as the third help line.

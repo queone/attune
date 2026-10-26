@@ -15,6 +15,14 @@
 - Emit the release message single-quoted with POSIX quote escaping in the printed release command.
 - Confine the tag to `v`, digits, and dots through each adapter's existing validation before emission.
 - Route each adapter's release-command prints through one emit helper.
+- Reject a Rust, Terraform, or Swift release whose tag, message, or CHANGELOG row prep did not prepare in the current repository before the approval prompt.
+- Accept `--yes` or `-y` after the two release arguments in every stack.
+- Print the same candidate files and release sequence under `--yes` as the interactive release.
+- Skip only the approval prompt under `--yes`.
+- Keep `--yes` out of the printed release command.
+- Refuse a release from a detached `HEAD` before the approval prompt in every stack.
+- Push the branch with `git push -u origin HEAD` when it has no upstream.
+- Keep each stack's branch push when the branch has an upstream.
 
 ## Go
 
@@ -38,6 +46,8 @@
 - Infer Go from `go.mod`.
 - Select Go explicitly with `--stack Go`.
 - Require the Go toolchain and the pinned staticcheck version installed by `build.sh`.
+- Pin `GOTOOLCHAIN` in `build.sh` to the `go.mod` `toolchain` directive, or else to its `go` directive, before the first Go command.
+- Name the pinned staticcheck, the active `GOTOOLCHAIN`, and both remedies when staticcheck cannot decode the toolchain's export data.
 - Run dependency tidying, formatting, fixes, vetting, tests with coverage, staticcheck, and compilation.
 - Install command binaries into `$(go env GOPATH)/bin`.
 - Bump the single detected `programVersion` during release prep.
@@ -54,12 +64,10 @@
 - Require the release commit to use the exact approved message.
 - Require clean committed `HEAD` before release compilation.
 - Reuse an approved retry commit only when the tag is absent, Git state is clean, the full commit message matches, and prepared metadata matches.
-- Validate every discovered utility declaration before release compilation.
 - Compile each discovered utility once in byte order with `go build -mod=readonly -buildvcs=true -o <temporary-output> -ldflags '-s -w' ./cmd/<target>`.
 - Run no canonical validation phase during release compilation.
 - Validate every compiled utility version and committed-HEAD provenance before installation.
 - Validate every compiled utility's help output before installation during release compilation.
-- Require every prep-changed utility version to equal the unprefixed release tag.
 - Preserve independent secondary utility versions during release compilation.
 - Install every validated utility by atomic adjacent replacement.
 - Recheck every installed utility version and committed-HEAD provenance before tagging.
@@ -81,9 +89,6 @@
 - Accept declared binary names for scoped builds.
 - Preserve package-wide shared validation during scoped builds.
 - Require one literal `PROGRAM_VERSION: &str` strict stable SemVer declaration in each declared binary path.
-- Validate every declaration before compilation and each compiled binary before installation.
-- Validate every compiled binary before release-metadata writes.
-- Reject a release whose tag, message, or CHANGELOG row prep did not prepare in the current repository before the approval prompt.
 
 ## Terraform
 
@@ -94,7 +99,6 @@
 - Keep Terraform working data in repository-local ignored artifact directories.
 - Derive release versions from Git tags without a source version bump.
 - Reject scoped builds because Terraform validation is repository-wide.
-- Reject a release whose tag, message, or CHANGELOG row prep did not prepare in the current repository before the approval prompt.
 
 ## Swift
 
@@ -116,4 +120,3 @@
 - Build only selected executable products during scoped builds.
 - Install only selected executable products during scoped builds.
 - Treat native Xcode projects and Apple application bundles as a possible future backend.
-- Reject a release whose tag, message, or CHANGELOG row prep did not prepare in the current repository before the approval prompt.

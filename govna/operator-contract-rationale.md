@@ -4,7 +4,7 @@ This explanatory document records why the Operator contract exists. `AGENTS.md` 
 
 ## Contract Purpose
 
-Govna exists to make programming and publishing ceremonies—the recurring CODE and DOC checkpoints around intent, authorization, scope, review, implementation or editing, verification, and release—more effective and efficient. Reusable context reduces process reconstruction, ambiguity, duplicated decisions, and avoidable rework across phases and sessions.
+Govna exists to make programming and publishing ceremonies more effective and efficient. Those ceremonies are the recurring CODE and DOC checkpoints around intent, authorization, scope, review, implementation or editing, verification, and release. Reusable context reduces process reconstruction, ambiguity, duplicated decisions, and avoidable rework across phases and sessions.
 
 Efficiency does not weaken authorization, review, verification, or release gates. Govna keeps decision-bearing choices with the Director and makes only settled, deterministic mechanics reusable.
 

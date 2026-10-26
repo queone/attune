@@ -8,11 +8,14 @@
 # Dispatch:
 #   ./build.sh [target ...] [-v|--verbose]      build + validate
 #   ./build.sh prep [flags] vX.Y.Z "message"    stage a release
-#   ./build.sh vX.Y.Z "message"                 run the release
+#   ./build.sh vX.Y.Z "message" [--yes|-y]      run the release
 set -euo pipefail
 
 _rel_tag_for_recovery=''
+_rel_assume_yes=0
+_rel_push_branch_args=(push origin)
 _staticcheck_path=''
+_staticcheck_pin='honnef.co/go/tools/cmd/staticcheck@v0.8.2'
 _git_err=''
 _prep_warning=''
 _prep_cl_err=''
@@ -386,6 +389,9 @@ EOF
     }
   fi
 
+  printf '\n%s\n' "$(yel7 '==> Pin the Go toolchain from go.mod')"
+  printf '    GOTOOLCHAIN=%s\n' "${GOTOOLCHAIN:-}"
+
   printf '\n%s\n' "$(yel7 '==> Update go.mod to reflect actual dependencies')"
   run_streaming grn3 go mod tidy
 
@@ -444,7 +450,7 @@ EOF
   sc_out=$("$_staticcheck_path" "${scopes[@]}" 2>&1) || sc_rc=$?
   if [ "$sc_rc" -ne 0 ]; then
     printf '%s\n' "$sc_out" | write_indented
-    printf 'staticcheck found issues\n' >&2
+    _staticcheck_failure_hint "$sc_out"
     return 1
   elif ! _is_blank "$sc_out"; then
     printf '%s\n' "$sc_out" | write_indented
@@ -620,6 +626,26 @@ _validate_utility_version_output() { # $1=binary $2=utility ID $3=declared versi
   rm -rf "$probe_dir"
 }
 
+_pin_go_toolchain() { # exports GOTOOLCHAIN from go.mod's toolchain or go directive; otherwise leaves it untouched
+  local line directive='' toolchain=''
+  [ -f go.mod ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+    toolchain\ * | toolchain"$(printf '\t')"*) [ -n "$toolchain" ] || toolchain=$(_trim "${line#toolchain}") ;;
+    go\ * | go"$(printf '\t')"*) [ -n "$directive" ] || directive=$(_trim "${line#go}") ;;
+    esac
+  done <go.mod
+  if [ -n "$toolchain" ]; then
+    case "$toolchain" in
+    go[0-9]*) export GOTOOLCHAIN="$toolchain" ;;
+    esac
+    return 0
+  fi
+  [ -n "$directive" ] || return 0
+  if printf '%s' "$directive" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+$'; then directive="$directive.0"; fi
+  export GOTOOLCHAIN="go$directive"
+}
+
 _module_path() { # -> go.mod module path without a trailing major-version segment, or empty
   local line
   [ -f go.mod ] || { printf ''; return; }
@@ -776,10 +802,22 @@ _ensure_staticcheck() { # $1=bin_dir $2=ext -> sets _staticcheck_path; stdout ms
   # match buildtool's step output; the result path is returned via a global so
   # this function is not run inside a command substitution.
   local bin_dir="$1" ext="$2"
-  local pinned='honnef.co/go/tools/cmd/staticcheck@v0.8.1'
-  printf '    installing: %s\n' "$(grn3 "$pinned")"
-  run_streaming grn3 go install "$pinned"
+  printf '    installing: %s\n' "$(grn3 "$_staticcheck_pin")"
+  run_streaming grn3 go install "$_staticcheck_pin"
   _staticcheck_path="$bin_dir/staticcheck$ext"
+}
+
+_staticcheck_failure_hint() { # $1=staticcheck output -> stderr: export-data hint, or the plain failure line
+  # A Go toolchain whose export data the pinned staticcheck cannot decode fails
+  # every import with the same message. Name the pin, the active toolchain, and
+  # both remedies instead of reporting it as ordinary findings.
+  local version="${_staticcheck_pin##*@}"
+  if printf '%s\n' "$1" | LC_ALL=C grep -Eq 'export data version [0-9]+ is greater than maximum supported version [0-9]+'; then
+    printf 'staticcheck %s cannot decode export data from GOTOOLCHAIN=%s\n' "$version" "${GOTOOLCHAIN:-auto}" >&2
+    printf 'fix: keep go.mod on a Go version this staticcheck release supports, or bump the staticcheck pin in build.sh after its release notes name this Go version\n' >&2
+  else
+    printf 'staticcheck found issues\n' >&2
+  fi
 }
 
 _next_patch_tag() {
@@ -949,7 +987,8 @@ _lint_test_naming() {
 # ════════════════════════════════════════════════════════════════════════════
 
 rel_usage() {
-  printf '%s %s\n' "$(bold "$(whi5 'Usage:')")" 'rel vX.Y.Z "release message"'
+  printf '%s %s\n' "$(bold "$(whi5 'Usage:')")" 'rel vX.Y.Z "release message" [--yes|-y]'
+  _emit_usage_line '-y, --yes' 'skip the approval prompt for an agent-run release'
   _emit_usage_line '-h, -?, --help' 'show this help'
   printf '\n%s\n' 'Release message must be 80 bytes or fewer.'
 }
@@ -980,11 +1019,32 @@ _release_signal_exit() { # $1=conventional signal exit status
   exit "$status"
 }
 
+# _rel_refuse_detached_head — fail before the approval prompt when HEAD is
+# detached, because the branch push cannot succeed after the tag push.
+_rel_refuse_detached_head() {
+  git symbolic-ref -q HEAD >/dev/null 2>&1 && return 0
+  _failure 'release: HEAD is detached; check out the release branch and rerun the release command'
+  return 1
+}
+
+# _rel_choose_branch_push — set _rel_push_branch_args to the branch push: the
+# stack's push when the branch tracks an upstream, or a push that sets origin
+# as the upstream when it has none.
+_rel_choose_branch_push() {
+  if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+    _rel_push_branch_args=(push origin)
+  else
+    _rel_push_branch_args=(push -u origin HEAD)
+  fi
+}
+
 _rel_run_inner() {
   local tag="$1" message="$2" candidate_tree approved_head='' base_tree retry=0 status
   _rel_tag_for_recovery="$tag"
 
   _ensure_git_repo || return 1
+  _rel_refuse_detached_head || return 1
+  _rel_choose_branch_push
   _release_validate_prepared "$tag" "$message" || return 1
   candidate_tree=$(_capture_worktree_tree "$_build_owned_dir/candidate.index") || return 1
   status=$(git status --porcelain --untracked-files=all 2>/dev/null) || {
@@ -1043,11 +1103,16 @@ _rel_run_inner() {
   printf '%s\n' '- atomically install every validated utility and recheck it'
   printf '%s\n' "- git tag $tag"
   printf '%s\n' "- git push origin $tag"
-  printf '%s\n' '- git push origin'
+  printf '%s\n' "- git ${_rel_push_branch_args[*]}"
 
   printf '%s' "$(yel7 'Review the file list and sequence above. Proceed with release? (y/N): ')"
   local answer=''
-  IFS= read -r answer || true
+  if [ "$_rel_assume_yes" -eq 1 ]; then
+    answer=y
+    printf '%s\n' 'y (--yes)'
+  else
+    IFS= read -r answer || true
+  fi
   case "$answer" in
   y | Y) ;;
   *)
@@ -1103,7 +1168,7 @@ _rel_run_inner() {
   }
   _rel_step 'git push tag' "$completed" push origin "$tag" || return 1
   completed="$completed, git push tag"
-  _rel_step 'git push branch' "$completed" push origin || return 1
+  _rel_step 'git push branch' "$completed" "${_rel_push_branch_args[@]}" || return 1
 }
 
 # _head_is_unborn — succeed when the current branch has no commit yet.
@@ -1334,11 +1399,11 @@ _recovery_error() {
   case ",$completed," in
   *", git push tag,"*)
     printf '\nrecovery: tag %s was pushed but the branch push failed\n' "$tag"
-    printf '  to retry: git push origin\n'
+    printf '  to retry: git %s\n' "${_rel_push_branch_args[*]}"
     ;;
   *", git tag,"*)
     printf '\nrecovery: tag %s exists locally but was not pushed\n' "$tag"
-    printf '  to retry push: git push origin %s && git push origin\n' "$tag"
+    printf '  to retry push: git push origin %s && git %s\n' "$tag" "${_rel_push_branch_args[*]}"
     printf '  to remove tag: git tag -d %s\n' "$tag"
     ;;
   *"git commit"*)
@@ -2228,6 +2293,7 @@ EOF
 
 main() {
   _color_init
+  _pin_go_toolchain
 
   if [ "${1:-}" = prep ]; then
     shift
@@ -2274,8 +2340,11 @@ rel_main() {
   if [ "$#" -eq 1 ]; then
     case "$1" in -h | -\? | --help) rel_usage; return 0 ;; esac
   fi
+  if [ "$#" -eq 3 ]; then
+    case "$3" in -y | --yes) _rel_assume_yes=1; set -- "$1" "$2" ;; esac
+  fi
   if [ "$#" -ne 2 ]; then
-    printf 'usage: rel vX.Y.Z "release message"\n' >&2
+    printf 'usage: rel vX.Y.Z "release message" [--yes|-y]\n' >&2
     return 2
   fi
   local tag message

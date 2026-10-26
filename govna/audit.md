@@ -14,6 +14,7 @@ Here, flavor means the CODE or DOC set of Govna files selected for the repositor
 
 - `-f, --flavor code|doc` — overlay flavor (default: auto-detect from repo signals).
 - `-s, --stack <name>` — CODE stack (default: inferred from manifests; not accepted with `--flavor doc`).
+- `-c, --check` — report the result without writing an AC; exit `3` when updates or Director choices are needed.
 - `-j, --json` — also print a JSON report to stdout alongside the markdown emission.
 - `-l, --diff-lines <N>` — diff truncation limit (default: 200).
 - `-n, --repo-name <name>` — override repo name (default: basename of the target directory).
@@ -192,8 +193,7 @@ Before comparing anything against the target, audit checks that Govna's rendered
 - Require `AGENTS.md` to define the structured Package completion report.
 - Require the selected release guide to end that structured report with the exact release command.
 - Reject retired command-only Package wording.
-- Require integrated audit adoption to enter Refine without another instruction.
-- Require integrated audit adoption to stop before Implement.
+- Require `AGENTS.md` to carry the integrated-audit Refine-entry exemption and pre-Implement stop.
 
 Audit skips target comparison when any coherence rule fails. The error names the conflicting rendered file and directs the Operator to report it to the Govna maintainer.
 
@@ -211,6 +211,8 @@ The stub carries an edit-detection marker (SHA-256 body hash). Re-running audit 
 
 An audit with no updates or Director choices exits successfully and prints `No Govna updates or Director choices found`, followed by a plain result tally and `No AC was written.` It performs no AC-number allocation, stub inspection, directory creation, or file write. It never deletes, overwrites, or validates an existing audit stub. With `--json`, the complete report remains available and `emitted` is `null`; no additional prose is written.
 
+A check-mode audit (`-c` or `--check`) runs the same comparison and writes nothing. It performs no AC-number allocation, stub inspection, directory creation, or file write. A clean result prints the clean-result line above and exits `0`. An actionable result prints `Govna updates or Director choices found`, followed by a plain result tally and `Run govna audit without --check to write the review AC.`, and exits `3`. With `--json`, the complete report is printed with `emitted` set to `null` and no additional prose. Because check mode emits no AC, it starts no agent-mediated adoption review.
+
 ### Agent-mediated review
 
 - Follow `AGENTS.md` `### Audit Adoption` for every phase entry, pause, and exit of this review.
@@ -223,16 +225,10 @@ An audit with no updates or Director choices exits successfully and prints `No G
 - Require the rendered baseline canon version to match the emitted AC marker.
 - Compare every actionable path through the emitted `### Audit Review` instructions.
 - Review the exact proposed rules.
-- Check rule overlap and placement.
 - Resolve every candidate reference.
-- Measure prospective contract growth.
 - Verify target-side acceptance evidence.
-- Keep the emitted AC and consumer repository unchanged during Audit and Refine.
-- Report every blocking finding and Director decision.
 
-Note: the executable ends after deterministic comparison and emission. The original explicit `govna audit` request authorizes this one bounded scratch review and its exact cleanup. The immutable AC records the adoption work; the active session records its phase. JSON remains available as optional machine output, but its diff fields are not required evidence for ordinary agent-mediated review.
-
-Effective implementation scope is the narrow rule that permits a directly affected supporting file to change when the Director already settled its outcome. Every Director-resolved routing target enters that scope while the generated AC remains unchanged. Explicitly named migration destinations also enter it. `govna/preserve.txt` enters only when a resolved outcome requires creating or changing it. `CHANGELOG.md` enters only when a resolved legacy-phrase outcome requires removing an exact phrase. Neither supporting-file adjustment requires a second Director authorization.
+Note: the executable ends after deterministic comparison and emission. JSON remains available as optional machine output, but its diff fields are not required evidence for ordinary agent-mediated review.
 
 ### Routing capabilities
 

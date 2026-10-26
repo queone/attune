@@ -30,8 +30,6 @@ Rules:
 - Use `##` for top-level sections.
 - Use `###` for thematic groupings inside a section.
 - Cap header nesting at `###`.
-- Apply the `## Instruction Style` section below to every new or rewritten instruction in this file.
-- Prefer instruction wording that is easiest for an LLM to follow, while staying simple for a human operator.
 - Treat AGENTS.md as the authoritative source for the rules it describes.
 - Conform overlay templates and other canon files to AGENTS.md.
 
@@ -53,7 +51,6 @@ Note: prefer wording that is easiest for an LLM to follow, while staying simple 
 - Use terse flat bullets.
 - Skip preambles, recaps, and implication walk-throughs.
 - Create files only after explicit user authorization — including draft files, scratch scripts, scaffolding, and config tweaks.
-- Make repository edits only after explicit user authorization.
 - Make the smallest change that satisfies the request once authorized.
 - Surface assumptions, ambiguities, and missing context before any direction-changing action.
 - Operate as the Operator on every interaction under `govna/roles.md`.
@@ -65,27 +62,20 @@ Note: prefer wording that is easiest for an LLM to follow, while staying simple 
 - Never paste a structured deliverable's full body in chat.
 - Report each written deliverable with a one-paragraph chat summary plus the file path.
 - Quote at most short, targeted snippets from a written file when discussing a specific change.
+- Paste the literal output in a code block when the Director asks to see a file or command output.
 
 ### Plain Language
 
 - Apply plain-language rules to responses, ACs, findings, completion reports, and release summaries.
 - Lead with the concrete problem, effect, or decision in plain language.
-- Pair each necessary Govna label with its plain-language meaning at first use.
+- Pair each necessary Govna label with its plain-language meaning at first use in a document.
 
 ### STE Replies
 
 - Apply these limits to chat replies only.
-- Keep each sentence that tells the reader to act to 20 words or fewer.
-- Keep every other sentence to 25 words or fewer.
-- Keep each paragraph to six sentences or fewer.
-- Give one instruction per sentence.
-- Start each warning with the command or the condition.
 - Use one term for each concept.
-- Keep each noun cluster to three words or fewer.
 - Use the active voice.
 - Use the passive voice only when the actor is unknown or unimportant.
-- Write complete sentences without dropping articles or verbs.
-- Exempt the terse status bullets that `## Review Style` requires from the complete-sentence limit.
 - Exempt code, commands, paths, identifiers, quoted text, and fixed lines that other AGENTS.md rules require from these limits.
 
 Note: these limits borrow from Simplified Technical English (ASD-STE100), and they supplement `### Plain Language` and `## Review Style` instead of replacing them.
@@ -95,7 +85,7 @@ Note: these limits borrow from Simplified Technical English (ASD-STE100), and th
 - Treat AGENTS.md as the active operating contract for this repository.
 - State "Govna contract loaded." before the first substantive govna-governed action of a session, and only after internalizing AGENTS.md.
 - Treat planning, editing, reviewing, command choice, and implementation work as substantive actions.
-- Confirm the gate set before any primary-repository file change: AC status, explicit authorization, scoped edits, tests in the same pass, and no agent-run commits.
+- Check the gate set silently before any primary-repository file change: AC status, explicit authorization, scoped edits, tests in the same pass, and no agent-run commits outside `### Agent Release`.
 - Route ancillary-repository and path changes through `### Primary And Ancillary Scope`.
 - Treat changed-content integrity, AC-template structure, Plain Language, Instruction Style, and applicable Pre-Implementation Verification as the tests-in-the-same-pass gate when a change pass creates or edits only an active AC document.
 - Resolve instruction conflicts in this order: user instruction within authorized scope, then AGENTS.md, then referenced govna docs, then model defaults.
@@ -110,7 +100,7 @@ Note: these limits borrow from Simplified Technical English (ASD-STE100), and th
 - Report a directly demonstrated contradiction, circular dependency, or unexecutable instruction without waiting for repetition.
 - Require repository evidence, an observed workflow consequence, or a directly demonstrable consequence for every finding.
 - Avoid executing a broken or unsafe path solely to produce finding evidence.
-- Exclude wording preferences, harmless redundancy, raw size, speculative maintainability concerns, speculative conflicts, and disagreement with a settled Director decision.
+- Exclude wording preferences, raw size, speculative maintainability concerns, speculative conflicts, and disagreement with a settled Director decision.
 - Cite each source path, section heading, short targeted instruction snippet, and operational effect.
 - State whether the finding blocks the active authorized work.
 - Recommend one minimal correction when one viable correction exists.
@@ -138,9 +128,7 @@ Note: these limits borrow from Simplified Technical English (ASD-STE100), and th
 - Report an acknowledged or deferred finding again only when one of those elements changes.
 - Apply the existing phase-routing rules when a finding affects the active AC.
 - Keep an unauthorized finding in chat and the active session.
-- Record an authorized correction in the governance document that owns the topic.
 - Prevent the governance-record rule from bypassing authorization for a governance edit.
-- Continue prohibiting memory entries, `feedback.md`, and session-note artifacts for repository-behavior corrections.
 - Prevent contract-integrity reporting from authorizing a new AC phase, governance edit, delegation, commit, publication, or release action.
 
 ### Contract Growth
@@ -148,7 +136,7 @@ Note: these limits borrow from Simplified Technical English (ASD-STE100), and th
 - Run a prospective contract-growth review during Audit or Refine when an active AC proposes governance instructions.
 - Run a measurable contract-growth review after authorized governance edits and before Implement completion.
 - Measure authorized AGENTS.md hunks against the phase-entry baseline while excluding unrelated working-tree changes.
-- Report added, removed, and net AGENTS.md line and rule-shaped-bullet counts.
+- Record added, removed, and net AGENTS.md line and rule-shaped-bullet counts in the closure-audit working record.
 - Prevent contract-growth measurements alone from becoming findings.
 - Check every new or rewritten AGENTS.md rule for overlap and placement.
 - Keep shared triggers, authorization boundaries, safety constraints, and required outcomes in AGENTS.md.
@@ -161,7 +149,9 @@ Note: these limits borrow from Simplified Technical English (ASD-STE100), and th
 - Return to Refine for an out-of-scope or decision-bearing overlap.
 - Test representative triggers, authorization boundaries, allowed actions, exceptions, and exit conditions after governance restructuring.
 - Record each governance-restructuring scenario input and expected outcome in the closure-audit record.
-- Treat material duplication, misplaced procedural detail, excessive flat density with operational effect, or demonstrated retrieval or execution impairment as contract-growth evidence.
+- Treat any repeated rule, misplaced procedural detail, excessive flat density with operational effect, or demonstrated retrieval or execution impairment as contract-growth evidence.
+- Keep each rule in exactly one governance file.
+- Reference the owning section by heading instead of restating its rule.
 
 ## Approval Boundaries
 
@@ -170,19 +160,19 @@ Note: these limits borrow from Simplified Technical English (ASD-STE100), and th
 - Treat each authorization as scope-limited.
 - Require fresh approval for every new action.
 - Treat an explicit request to run govna audit as authorization for integrated audit adoption under `### Audit Adoption`.
-- Continue Director-authorized Implement authority only for an eligible bounded completeness correction under `### Four-Phase Workflow`.
 - Require explicit approval for: create, delete, rename, publish, release, or any destructive change.
 - Require explicit approval for: governance files, CI/release config, secrets handling, external integrations.
 - Edit only the files listed in the AC's `## In Scope` section, even after the user has authorized implementation.
-- Apply the effective-scope exception in `### Effective Implementation Scope` during Implement, closure-audit correction, and Ratify correction.
 - Apply the same effective-implementation-scope principle to any other emitted-AC tool with Director-resolved routing decisions (e.g., `rm`'s Routing Decisions) — the named target is in scope once resolved, even when absent from `## In Scope`.
 - Stop when a request is ambiguous or the change is hard to reverse.
 - Ask for direction before proceeding.
 - Wait for explicit user request before preparing, executing, publishing, deploying, or distributing — including drafting commit messages, commit commands, version bumps, or release notes.
-- **Leave every `git commit` for the user to execute. No EXCEPTION.**
-- Treat an explicit valid Package instruction for an established Ratified release batch as the trigger for release-prep bookkeeping.
-- Treat an explicit valid Package instruction for an established direct batch as the same trigger.
-- Follow the Pre-Release Checklist in `govna/build-release.md` when executing release-prep bookkeeping.
+- **Leave every `git commit` for the user to execute, except under `### Agent Release`.**
+- Add no attribution trailer to a drafted or agent-run commit or release message.
+- Leave every GitHub write for the Director to execute, except the release push under `### Agent Release`.
+- Treat issue closes, comments, labels, pull requests, releases, and pushes as GitHub writes.
+- Present the exact GitHub write command in chat for the Director to run, except under `### Agent Release`.
+- Follow the Pre-Release Checklist in `govna/build-release.md` during Package.
 
 ### Effective Implementation Scope
 
@@ -206,8 +196,8 @@ Note: these limits borrow from Simplified Technical English (ASD-STE100), and th
 - Return to Refine when an adjustment changes or interprets a Director-owned decision.
 - Return to Refine when an adjustment expands production scope, changes expected results, or adds a requirement.
 - Return to Refine when more than one materially distinct valid outcome exists.
-- Record each effective-scope path, triggering in-scope change, and eligibility rule in the applicable Implement or Ratify completion report.
-- Record the same evidence in the closure-audit record when applicable.
+- Record each effective-scope path, triggering in-scope change, and eligibility rule in the closure-audit working record.
+- Name each effective-scope path in one line of the applicable Implement or Ratify completion report.
 - Require no second Director authorization for an eligible effective-scope adjustment.
 
 ### Delegation and sub-agent use
@@ -240,12 +230,11 @@ Note: this rule does not prohibit batching independent commands.
 - Draft no retroactive AC for such a companion change.
 - Draft `govna/ac<N>-<slug>.md` before implementation using `govna/ac-template.md`.
 - Define scope, out-of-scope, and acceptance tests in the AC.
-- Wait for explicit user confirmation that the AC is implementation-ready before starting implementation.
 
 ### Four-Phase Workflow
 
 - Follow the lifecycle `Draft → Audit → Refine → Implement → Ratify → Package` for every governed AC.
-- Report each automatic phase transition and its evidence.
+- Report each automatic phase transition in one line of the next completion report.
 - Pause immediately when an automatic-transition eligibility condition fails.
 - Pause immediately when a Director-owned decision appears.
 - Prevent automatic advancement from authorizing Implement, Ratify, Package, release preparation, publication, delegation, or commits.
@@ -265,8 +254,6 @@ Note: this rule does not prohibit batching independent commands.
 - Edit the AC during Refine when an Audit finding or settled Director decision requires an AC change.
 - Complete Refine without editing the AC when no Audit finding or settled Director decision requires an AC change and no Director-specific decision remains unresolved.
 - Run Pre-Implementation Verification after eligible automatic Refine completion.
-- Report implementation readiness only when that verification passes.
-- Remain in Refine when that verification finds a gap.
 - Do not begin implementation during Refine.
 - Pause after Refine and await explicit Director implementation-ready confirmation to Implement.
 - Implement only the settled AC scope during Implement.
@@ -294,6 +281,7 @@ Note: this rule does not prohibit batching independent commands.
 - Include tests, adversarial verification, and defect correction in Implement.
 - Run one exhaustive, non-mutating closure audit after Implement, validation, adversarial verification, and defect correction.
 - Keep the closure-audit working record in the active agent's session.
+- Keep the closure-audit working record out of chat replies.
 - Do not create a separate closure-audit artifact.
 - Capture one deterministic Implement evidence snapshot in the closure-audit working record.
 - Complete the snapshot before Implement completion.
@@ -303,9 +291,9 @@ Note: this rule does not prohibit batching independent commands.
 - Record pending Director review for manual acceptance tests without treating that pending review as an implementation finding or a path gap that blocks Implement completion.
 - Return to Implement for implementation defects found by the closure audit.
 - Return to Refine for scope, contract, or Director decision changes found by the closure audit.
-- Report every acceptance-test disposition in the Implement completion report.
+- Report each failed, pending, manual, or unexercised acceptance test in the Implement completion report.
+- Cover every passing automated acceptance test in one line of that report.
 - Report every residual risk in the Implement completion report.
-- State zero unresolved implementation findings in the Implement completion report before Ratify.
 - Pause after Implement and await Ratify.
 - Treat standalone `Ratify` or `ratify` after successful Implement completion as the Director's acceptance action.
 - Treat evidence as current only when the snapshot is present, complete, and identity-matching.
@@ -320,6 +308,8 @@ Note: this rule does not prohibit batching independent commands.
 - Rerun applicable validation when Ratify evidence is missing or stale.
 - Perform the final review during the same Ratify turn.
 - Complete Ratify in that turn when the review finds no issue.
+- Report a clean Ratify as its outcome sentence and the `Awaiting` line.
+- Add only new findings, corrections, and residual risks to that report.
 - Apply the Approval Boundaries > General Gates and roles.md `What the Operator Must Defer` boundaries to classify any other Director-owned Ratify finding.
 - Return Ratify feedback to Refine, without completing Ratify, for a contract, scope, product, security, destructive, publication, or release finding.
 - Auto-correct an implementation-only finding inline during Ratify.
@@ -330,7 +320,6 @@ Note: this rule does not prohibit batching independent commands.
 - Return Ratify feedback to Implement, without completing Ratify, for an implementation-only finding still unresolved after 3 rounds.
 - Skip requests for a second acceptance signal after a clean Ratify review.
 - Treat `Package` as the separate post-Ratify name for release preparation, not as a fifth AC phase.
-- Start `Package` only after an explicit Director request.
 - Do not infer Package from Ratify acceptance.
 - Use the successful final full build and clean Ratify review as current pre-change Package evidence.
 - Pass the full build's validation token to Rust prep during `Package` only when the repository provides Rust validation-token support.
@@ -362,11 +351,10 @@ Note: this rule does not prohibit batching independent commands.
 - Ask the Director for the AC number and last completed lifecycle action when phase eligibility cannot be established.
 - Treat one active Ratified AC as an established one-AC release batch only when it is the complete pending release batch.
 - Treat only a Director-named complete pending release batch as an established multi-AC release batch.
-- Accept only Package followed by a plus-joined list of uppercase AC<number> references as the named-batch Package form.
+- Accept only Package, `release`, or `rel` followed by a plus-joined list of uppercase AC<number> references as the named-batch form.
 - Apply standalone Package, package, pack, or prep to the established Ratified release batch.
 - Apply standalone Package, package, pack, or prep to an established direct batch when no AC can enter Package.
 - Ask the Director to name the release batch when multiple ungrouped Ratified ACs can enter Package.
-- Reject a named release batch that contains a non-Ratified AC.
 - Measure the projected complete pending release batch with one private provisional prefix-plus-summary string before another AC enters Implement.
 - Use the provisional string only for the 80-byte fit check.
 - Discard the provisional string after the fit check.
@@ -382,8 +370,23 @@ Note: this rule does not prohibit batching independent commands.
 - Interpret standalone `Package`, `package`, `pack`, or `prep` as Package only after an explicit request for a Ratified release batch or direct batch.
 - Do not interpret `run ./build.sh prep ...`, `pack the binary`, `prepare the build`, or non-standalone `prep` as workflow advancement.
 - Treat ordinary coding language such as `build`, `package the binary`, or a package-manager command as unrelated to phase advancement.
-- Require explicit operational wording such as `run ./build.sh` before executing a repository command.
-- Never infer a shell command from an action name.
+- Require explicit operational wording such as `run ./build.sh` before executing a repository command outside an authorized phase action or `### Agent Release`.
+- Interpret `release` or `rel`, standalone or with a named batch, only as Package plus an agent-run release under `### Agent Release`.
+
+### Agent Release
+
+- Apply these rules when the Director sends `release` or `rel`, standalone or with a named batch.
+- Treat standalone `release` or `rel` as authorization for Package plus one agent-run release.
+- Apply standalone `release` or `rel` to the same release batch as standalone Package.
+- Treat `release` or `rel` followed by a named batch as Package of that batch plus one agent-run release.
+- Stop before the release when Package fails or needs a Director decision.
+- Run the printed release command with `--yes` appended.
+- Run no other git or GitHub write under the keyword.
+- Retry nothing after a release failure.
+- Report the failure output and the printed recovery command to the Director.
+- Report Package and the release result in one completion report.
+- Replace `No commit or release command executed.` and `Run below to release:` with the release result in that report.
+- Treat a successful agent-run release as a completed release under `### Completed Release`.
 
 ### Primary And Ancillary Scope
 
@@ -395,12 +398,6 @@ Note: this rule does not prohibit batching independent commands.
 - Prevent ancillary work from satisfying primary-repository scope, tests, validation, or phase gates.
 - Restate the primary repository and paused phase when returning from ancillary work.
 
-### AC Critique Gate
-
-- Wait for the Director's explicit implementation-ready confirmation.
-
-Note: the Director flags scope concerns in chat during this window.
-
 ### Pre-Implementation Verification
 
 - Run this checklist after the Director resolves all review questions.
@@ -409,9 +406,10 @@ Note: the Director flags scope concerns in chat during this window.
 - Confirm ATs match settled wording.
 - Confirm the AC title and Summary lead with the concrete outcome in plain language.
 - Confirm every new or rewritten instruction in AGENTS.md follows Instruction Style.
-- List ✓ for each check.
+- Report a clean checklist in one line.
 - Flag every gap.
 - Authorize implementation only when the checklist is clean.
+- Remain in Refine when the checklist finds a gap.
 
 ### Audit Adoption
 
@@ -430,8 +428,6 @@ Note: the Director flags scope concerns in chat during this window.
 - Require a new audit emission when a required correction would change the immutable AC.
 - Complete Refine without editing the emitted AC when no blocker remains.
 - Run Pre-Implementation Verification after integrated Refine.
-- Report implementation readiness only when Pre-Implementation Verification passes.
-- Remain in Refine when Pre-Implementation Verification finds a gap.
 - Stop integrated audit adoption before Implement.
 - Track the active phase in the session instead of the emitted AC.
 - Apply these rules whenever implementing an audit-emitted AC.
@@ -450,7 +446,6 @@ Note: the Director flags scope concerns in chat during this window.
 
 ## File-Change Discipline
 
-- Prefer targeted edits over broad rewrites.
 - Preserve user changes and unrelated local modifications.
 - Update only the files required for the task plus directly affected docs, all in the same commit.
 - Update affected docs in the same pass when a change adds a file, command, flag, or major decision.
@@ -463,7 +458,6 @@ Note: the Director flags scope concerns in chat during this window.
 - Delete completed AC files at release prep per the development cycle — never mark `## Status` as `DONE`.
 - Record follow-on improvements in `plan.md`.
 - Note follow-on improvements to the user when no planning artifact exists.
-- Keep the current task strictly within its authorized scope.
 - Use repo-relative paths or placeholders like `<project-root>` in committed content.
 - Scan staged content for `/Users/`, `/home/`, or `C:\` before committing.
 - Replace every staged absolute-path match.
@@ -480,15 +474,16 @@ Note: the Director flags scope concerns in chat during this window.
 - Keep one finding sequence for the active AC lifecycle.
 - Start a separate finding sequence for each standalone contract-integrity report.
 - Exclude acceptance tests, verification evidence, workflow mechanics, and non-finding commentary from finding identifiers.
-- Cite file paths and concrete behavior.
-- Skip preamble summaries.
+- Cite file paths, line numbers, and concrete behavior.
 - Prioritize bugs, regressions, missing tests, and drift from documented behavior.
 - Treat AC-document ceremony issues as nits after implementation starts and release prep will delete the AC.
 - Prioritize defects that affect the delivered contract, implementation scope, tests, or release safety.
 - Report "no issues" directly when none are found.
 - Note every residual risk or verification gap.
 - Open every substantive phase completion with one short outcome sentence.
-- Keep completions terse with changed items, flat bullets, and a final `Awaiting <specific Director-initiated next>.` line.
+- Keep completions terse with flat bullets and a final `Awaiting <specific Director-initiated next>.` line.
+- Summarize the settled AC scope in at most one line of an Implement completion report.
+- Report every change that differs from or adds to the settled AC.
 - Focus completion summaries on changed behavior, material verification, findings, corrections, residual risks, and Director decisions.
 - Suppress routine repository labels, phase labels, phase mechanics, expected skips, duplicated status, and expected no-action confirmations.
 - Report suppressed workflow details only when exceptional or actionable.
@@ -499,21 +494,36 @@ Note: the Director flags scope concerns in chat during this window.
 
 Note: the Director triggers those actions; Ratify names what is pending.
 - Skip settled repo mechanics in completions, including governance structure and contract conventions.
-- Default to plain text and simple bullets.
+- Default to plain text.
 - Use tables or richer structure only when content clearly benefits.
 - Note skipped checks only when the omission is unusual or affects confidence.
 - Run every required validation gate.
 - Report successful routine gates only when they materially affect confidence.
 - Always report failures and skipped required gates.
 - Present architectural decisions to the director as: a recommendation when one viable option exists; two bounded options plus a recommendation when two exist; the best two plus a one-line note on the rest when more than two exist.
-- Include the three-part self-review structure (Verified / Red-teamed / Not checked) defined in `govna/roles.md` in every substantial completion report, even when the default is terse.
-- Color `Verified:`, `Red-teamed:`, and `Not checked:` cyan only when the response channel explicitly supports native color or ANSI color.
-- Preserve plain-text self-review headings when response color is unavailable or disabled.
+- Include the three-part self-review structure (Verified / Red-teamed / Not checked) defined in `govna/roles.md` in every substantial completion report except a clean Ratify report.
+- Color `Verified:`, `Red-teamed:`, and `Not checked:` cyan only when the response channel explicitly supports native color or ANSI color and color is enabled.
 - Start every Package completion report with the plain, unbulleted, unindented line `Package complete.`.
 - Insert exactly one blank line after `Package complete.` before `Verified:`.
 - Keep `Verified:`, `Red-teamed:`, `Not checked:`, and `Run below to release:` in the Package completion report.
 - State `No commit or release command executed.`.
 - Present the exact drafted release command.
+
+### Package Self-review
+
+- Apply these rules to the Package completion report's self-review in place of roles.md's self-review reporting rules.
+- Limit each self-review heading to one sentence.
+- State the semver reason under `Verified:`.
+- State what changed after the Package evidence under `Red-teamed:`.
+- State the remaining manual check, or that none remains, under `Not checked:`.
+
+### Completed Release
+
+- Treat the Director's `shipped` as a completed release.
+- Run no git or gh command to confirm a completed release.
+- Acknowledge a completed release in one line.
+- Name the next one to three `plan.md` items after that line.
+- Recommend one of those items.
 
 ## Base Rules
 
@@ -578,5 +588,3 @@ Note: the Director triggers those actions; Ratify names what is pending.
 - Reach for `Read` only to fetch unseen content or check for recent changes.
 
 ## Project Rules
-
-- Follow existing repo patterns unless an approved improvement says otherwise.
