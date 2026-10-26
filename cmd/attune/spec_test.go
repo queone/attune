@@ -54,7 +54,7 @@ func TestLoadSourcesParsesNamedContents(t *testing.T) {
 		}
 		sources = append(sources, specSource{name: e.Name(), content: content})
 	}
-	bundle, err := loadSources(sources)
+	bundle, err := loadSources(sources, "azure")
 	if err != nil {
 		t.Fatalf("loadSources: %v", err)
 	}
@@ -62,10 +62,10 @@ func TestLoadSourcesParsesNamedContents(t *testing.T) {
 		t.Errorf("bundle.Len() = %d, want 6", bundle.Len())
 	}
 	dup := append(slices.Clone(sources), specSource{name: "dup/" + sources[0].name, content: sources[0].content})
-	if _, err := loadSources(dup); err == nil || !strings.Contains(err.Error(), "duplicate resource key") {
+	if _, err := loadSources(dup, "azure"); err == nil || !strings.Contains(err.Error(), "duplicate resource key") {
 		t.Errorf("duplicate key: got %v", err)
 	}
-	if _, err := loadSources([]specSource{{name: "broken.yaml", content: []byte("kind: [")}}); err == nil || !strings.Contains(err.Error(), "parse broken.yaml") {
+	if _, err := loadSources([]specSource{{name: "broken.yaml", content: []byte("kind: [")}}, "azure"); err == nil || !strings.Contains(err.Error(), "parse broken.yaml") {
 		t.Errorf("parse error names the source: got %v", err)
 	}
 }
@@ -86,5 +86,81 @@ func loadDir(t *testing.T, dir string) (*Bundle, error) {
 		}
 		sources = append(sources, specSource{name: p, content: b})
 	}
-	return loadSources(sources)
+	return loadSources(sources, "azure")
+}
+
+const dnsSpecYAML = "kind: dnsRecordSet\nzone: example.com\ntype: A\nname: www\nttl: 300\nvalues:\n  - 192.0.2.10\n"
+
+// TestSpecProviderFieldSelectsRegisteredProvider — AT1: a spec naming
+// azure loads tagged with it; a spec naming an unregistered provider fails
+// with the registered list.
+func TestSpecProviderFieldSelectsRegisteredProvider(t *testing.T) {
+	bundle, err := loadSources([]specSource{{name: "dns.yaml", content: []byte("provider: azure\n" + dnsSpecYAML)}}, "azure")
+	if err != nil {
+		t.Fatalf("loadSources: %v", err)
+	}
+	if len(bundle.Dns) != 1 || bundle.Dns[0].Provider != "azure" {
+		t.Fatalf("bundle.Dns = %+v, want one azure record", bundle.Dns)
+	}
+	_, err = loadSources([]specSource{{name: "dns.yaml", content: []byte("provider: nope\n" + dnsSpecYAML)}}, "azure")
+	if err == nil || err.Error() != `unknown provider "nope"; registered: azure` {
+		t.Fatalf("unknown provider: %v", err)
+	}
+}
+
+// TestSpecWithoutProviderUsesDefault — AT2: the default provider fills a
+// spec that omits the field, and an unknown default fails the same way.
+func TestSpecWithoutProviderUsesDefault(t *testing.T) {
+	bundle, err := loadSources([]specSource{{name: "dns.yaml", content: []byte(dnsSpecYAML)}}, "azure")
+	if err != nil {
+		t.Fatalf("loadSources: %v", err)
+	}
+	if bundle.Dns[0].Provider != "azure" {
+		t.Errorf("Provider = %q, want azure", bundle.Dns[0].Provider)
+	}
+	if _, err := loadSources([]specSource{{name: "dns.yaml", content: []byte(dnsSpecYAML)}}, "nope"); err == nil || !strings.Contains(err.Error(), `unknown provider "nope"`) {
+		t.Errorf("unknown default provider: %v", err)
+	}
+}
+
+// TestValidateRejectsKindTheProviderDoesNotSupport — AT3: a kind outside
+// the provider's registered kinds fails offline, and a supported kind
+// loads.
+func TestValidateRejectsKindTheProviderDoesNotSupport(t *testing.T) {
+	registerDNSOnlyProvider(t)
+	group := "provider: dnsonly\nkind: securityGroup\nname: eng\n"
+	_, err := loadSources([]specSource{{name: "group.yaml", content: []byte(group)}}, "azure")
+	if err == nil || err.Error() != `provider "dnsonly" does not support kind "securityGroup"` {
+		t.Fatalf("unsupported kind: %v", err)
+	}
+	bundle, err := loadSources([]specSource{{name: "dns.yaml", content: []byte("provider: dnsonly\n" + dnsSpecYAML)}}, "azure")
+	if err != nil || bundle.Dns[0].Provider != "dnsonly" {
+		t.Fatalf("supported kind: bundle=%+v err=%v", bundle, err)
+	}
+}
+
+// TestDuplicateKeysAreScopedPerProvider — AT6: the same record set under
+// two providers is two resources; twice under one provider is a duplicate.
+func TestDuplicateKeysAreScopedPerProvider(t *testing.T) {
+	registerDNSOnlyProvider(t)
+	bundle, err := loadSources([]specSource{
+		{name: "azure.yaml", content: []byte("provider: azure\n" + dnsSpecYAML)},
+		{name: "dnsonly.yaml", content: []byte("provider: dnsonly\n" + dnsSpecYAML)},
+	}, "azure")
+	if err != nil {
+		t.Fatalf("loadSources: %v", err)
+	}
+	if len(bundle.Dns) != 2 || !slices.Equal(bundle.Providers(), []string{"azure", "dnsonly"}) {
+		t.Fatalf("bundle.Dns = %+v providers = %v", bundle.Dns, bundle.Providers())
+	}
+	if part := bundle.ForProvider("dnsonly"); part.Len() != 1 || part.Dns[0].Provider != "dnsonly" {
+		t.Errorf("ForProvider(dnsonly) = %+v", part)
+	}
+	_, err = loadSources([]specSource{
+		{name: "a.yaml", content: []byte("provider: azure\n" + dnsSpecYAML)},
+		{name: "b.yaml", content: []byte(dnsSpecYAML)},
+	}, "azure")
+	if err == nil || !strings.Contains(err.Error(), "duplicate resource key") {
+		t.Errorf("same provider twice: %v", err)
+	}
 }

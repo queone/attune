@@ -3,12 +3,15 @@ package main
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 )
 
 // fakeProvider is a hand-rolled Provider double for Plan/Apply tests,
-// mirroring rkit's AssignmentProvider test fixture.
+// mirroring rkit's AssignmentProvider test fixture. It implements
+// LiveProvider and every capability interface.
 type fakeProvider struct {
+	name            string
 	assignments     []LiveAssignment
 	dns             []DnsRecord
 	zones           []string
@@ -21,6 +24,35 @@ type fakeProvider struct {
 	roleDefinitions []RoleDefinition
 	resourceGroups  []ResourceGroup
 }
+
+var (
+	_ Provider     = (*fakeProvider)(nil)
+	_ LiveProvider = (*fakeProvider)(nil)
+)
+
+func (p *fakeProvider) Ground() (Account, error) {
+	return Account{Tenant: "tenant-" + p.name, Subscription: "sub-" + p.name, Identity: "id-" + p.name}, nil
+}
+func (p *fakeProvider) Describe() string { return "fake=" + p.name }
+
+// dnsOnlyProvider implements LiveProvider and DNSProvider only, standing in
+// for a provider that cannot hold identity, role, or resource-group specs.
+type dnsOnlyProvider struct {
+	dns fakeProvider
+}
+
+var (
+	_ LiveProvider = (*dnsOnlyProvider)(nil)
+	_ DNSProvider  = (*dnsOnlyProvider)(nil)
+)
+
+func (p *dnsOnlyProvider) Ground() (Account, error)                 { return p.dns.Ground() }
+func (p *dnsOnlyProvider) Describe() string                         { return p.dns.Describe() }
+func (p *dnsOnlyProvider) EnsureZone(zone string) error             { return p.dns.EnsureZone(zone) }
+func (p *dnsOnlyProvider) HasZone(zone string) (bool, error)        { return p.dns.HasZone(zone) }
+func (p *dnsOnlyProvider) ListDNS(zone string) ([]DnsRecord, error) { return p.dns.ListDNS(zone) }
+func (p *dnsOnlyProvider) PutDNS(r DnsRecord) error                 { return p.dns.PutDNS(r) }
+func (p *dnsOnlyProvider) DeleteDNS(r DnsRecord) error              { return p.dns.DeleteDNS(r) }
 
 func (p *fakeProvider) EnsureZone(zone string) error {
 	p.ensured = append(p.ensured, zone)
@@ -473,5 +505,26 @@ func TestGroupUpdateCarriesAddedAndRemovedMembers(t *testing.T) {
 	}
 	if !slices.Equal(changes[0].Diffs, want) {
 		t.Errorf("Diffs = %+v, want %+v", changes[0].Diffs, want)
+	}
+}
+
+// TestPlanRejectsKindTheProviderLacks — AT3: Plan names the provider and
+// kind when handed a bundle the provider's capabilities cannot hold, and
+// still plans the kinds it can.
+func TestPlanRejectsKindTheProviderLacks(t *testing.T) {
+	provider := &dnsOnlyProvider{}
+	bundle := &Bundle{Groups: []SecurityGroup{{Name: "eng"}}}
+	_, err := Plan(provider, bundle, &Options{Provider: "dnsonly"})
+	if err == nil || err.Error() != `provider "dnsonly" does not support kind "securityGroup"` {
+		t.Fatalf("Plan with an unsupported kind: %v", err)
+	}
+	dns := &Bundle{Dns: []DnsRecord{{Zone: "example.com", RecordType: "A", Name: "www", TTL: 300, Values: []string{"192.0.2.10"}}}}
+	changes, err := Plan(provider, dns, &Options{Provider: "dnsonly"})
+	if err != nil || len(changes) != 1 || changes[0].Kind != "dnsRecordSet" {
+		t.Fatalf("Plan with a supported kind: changes=%v err=%v", changes, err)
+	}
+	applyErr := Apply(provider, []Change{{Kind: "securityGroup", Action: ActionCreate, Target: Target{Kind: TargetGroup, Group: SecurityGroup{Name: "eng"}}}}, "", nil)
+	if applyErr == nil || !strings.Contains(applyErr.Error(), "lacks the identity capability") {
+		t.Fatalf("Apply with an unsupported target: %v", applyErr)
 	}
 }

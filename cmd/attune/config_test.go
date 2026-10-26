@@ -112,3 +112,26 @@ func TestSpecsKeyIsAcceptedAndIgnored(t *testing.T) {
 		t.Fatalf("parsed %+v", *cfg)
 	}
 }
+
+// TestProviderBlocksFollowTheRegistry — AT11: a block named after a
+// registered provider parses and is kept raw for it, an unregistered block
+// is an unknown key, and the azure block still parses as before.
+func TestProviderBlocksFollowTheRegistry(t *testing.T) {
+	if _, err := ParseConfig([]byte("provider: azure\ndnsonly:\n  token: x\n")); err == nil || !strings.Contains(err.Error(), `"dnsonly"`) {
+		t.Fatalf("unregistered block: %v", err)
+	}
+	registerDNSOnlyProvider(t)
+	cfg, err := ParseConfig([]byte("provider: azure\ndnsonly:\n  token: x\nazure:\n  subscription: sub\n  resource_group: rg\n"))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.ProviderBlocks["dnsonly"]["token"] != "x" {
+		t.Errorf("dnsonly block = %v", cfg.ProviderBlocks["dnsonly"])
+	}
+	if cfg.Subscription != "sub" || cfg.ResourceGroup != "rg" || cfg.ProviderBlocks["azure"]["subscription"] != "sub" {
+		t.Errorf("azure block: cfg=%+v", cfg)
+	}
+	if _, err := ParseConfig([]byte("provider: azure\naws:\n  region: x\n")); err == nil || !strings.Contains(err.Error(), `"aws"`) {
+		t.Errorf("still-unregistered block: %v", err)
+	}
+}

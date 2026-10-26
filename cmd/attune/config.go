@@ -9,6 +9,8 @@ import (
 )
 
 // Config is attune.yaml's parsed content before override precedence applies.
+// ProviderBlocks holds the raw mapping of every registered provider block
+// present in the file, keyed by block name, for the provider's constructor.
 type Config struct {
 	Provider            string
 	ContentVersion      string
@@ -18,6 +20,7 @@ type Config struct {
 	PruneIdentities     *bool
 	PruneRoles          *bool
 	PruneResourceGroups *bool
+	ProviderBlocks      map[string]map[string]any
 }
 
 // Overrides holds flag-level values that take precedence over Config.
@@ -105,7 +108,9 @@ func isASCIIAlnum(c byte) bool {
 
 // ParseConfig parses attune.yaml content, which comes from the store's
 // attune.yaml entry. The specs key is accepted and ignored so older
-// configurations keep parsing.
+// configurations keep parsing. One block per registered provider is
+// accepted; the azure block is parsed here, every other block is kept raw
+// for its provider.
 func ParseConfig(raw []byte) (*Config, error) {
 	expanded, err := expandEnvironment(string(raw))
 	if err != nil {
@@ -122,8 +127,19 @@ func ParseConfig(raw []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknown(m, []string{"provider", "specs", "content_version", "azure", "prune"}, "attune.yaml"); err != nil {
+	allowed := append([]string{"provider", "specs", "content_version", "prune"}, registeredConfigBlocks()...)
+	if err := rejectUnknown(m, allowed, "attune.yaml"); err != nil {
 		return nil, err
+	}
+	blocks := map[string]map[string]any{}
+	for _, name := range registeredConfigBlocks() {
+		block, err := cfgOptionalMapping(m, name)
+		if err != nil {
+			return nil, err
+		}
+		if len(block) > 0 {
+			blocks[name] = block
+		}
 	}
 	azure, err := cfgOptionalMapping(m, "azure")
 	if err != nil {
@@ -182,6 +198,7 @@ func ParseConfig(raw []byte) (*Config, error) {
 		PruneIdentities:     pruneIdentities,
 		PruneRoles:          pruneRoles,
 		PruneResourceGroups: pruneResourceGroups,
+		ProviderBlocks:      blocks,
 	}, nil
 }
 

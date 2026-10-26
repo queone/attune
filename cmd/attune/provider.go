@@ -1,0 +1,153 @@
+package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+	"sort"
+	"strings"
+)
+
+// DNSProvider is the capability a provider offers for dnsRecordSet specs.
+type DNSProvider interface {
+	EnsureZone(zone string) error
+	HasZone(zone string) (bool, error)
+	ListDNS(zone string) ([]DnsRecord, error)
+	PutDNS(record DnsRecord) error
+	DeleteDNS(record DnsRecord) error
+}
+
+// IdentityProvider is the capability a provider offers for securityGroup
+// and appRegistration specs.
+type IdentityProvider interface {
+	GetGroup(name string) (*SecurityGroup, error)
+	ListGroupNames() ([]string, error)
+	PutGroup(group SecurityGroup) error
+	DeleteGroup(name string) error
+	GetApp(name string) (*AppRegistration, error)
+	ListAppNames() ([]string, error)
+	PutApp(app AppRegistration) error
+	DeleteApp(name string) error
+}
+
+// RoleProvider is the capability a provider offers for roleDefinition and
+// roleAssignment specs.
+type RoleProvider interface {
+	ListRoleDefinitions(subscription string) ([]RoleDefinition, error)
+	PutRoleDefinition(role RoleDefinition, subscription string) error
+	DeleteRoleDefinition(name, subscription string) error
+	ResolvePrincipal(name, principalType string) (string, error)
+	ResolveRole(name, subscription string) (string, error)
+	ListRoleAssignments(scope string) ([]LiveAssignment, error)
+	PutRoleAssignment(principal, role, scope string) error
+	DeleteRoleAssignment(assignment LiveAssignment) error
+}
+
+// ResourceGroupProvider is the capability a provider offers for
+// resourceGroup specs.
+type ResourceGroupProvider interface {
+	ListResourceGroups() ([]ResourceGroup, error)
+	PutResourceGroup(group ResourceGroup) error
+	DeleteResourceGroup(name string) error
+}
+
+// Provider is the union of every capability; a provider that supports every
+// kind implements it, a narrower provider implements only its capabilities.
+type Provider interface {
+	DNSProvider
+	IdentityProvider
+	RoleProvider
+	ResourceGroupProvider
+}
+
+// LiveProvider is what the registry constructs for a live run: it can
+// authenticate and describe its non-secret target, and it offers one or
+// more capability interfaces that Plan and Apply assert per kind family.
+type LiveProvider interface {
+	// Ground authenticates and returns the account the run operates as.
+	Ground() (Account, error)
+	// Describe renders the non-secret diagnostic fields of the target.
+	Describe() string
+}
+
+// ProviderSpec registers one provider: its name as used by the spec
+// `provider` field, the kinds it supports, the attune.yaml block it reads,
+// and the constructor for a live run.
+type ProviderSpec struct {
+	Name        string
+	Kinds       []string
+	ConfigBlock string
+	New         func(settings Settings, block map[string]any) (LiveProvider, error)
+}
+
+var registry = map[string]ProviderSpec{}
+
+// Register adds or replaces a provider in the registry.
+func Register(spec ProviderSpec) {
+	registry[spec.Name] = spec
+}
+
+// LookupProvider returns the registered provider for name, or an error that
+// names it and lists every registered provider.
+func LookupProvider(name string) (ProviderSpec, error) {
+	spec, ok := registry[name]
+	if !ok {
+		return ProviderSpec{}, fmt.Errorf("unknown provider %q; registered: %s", name, strings.Join(RegisteredProviders(), ", "))
+	}
+	return spec, nil
+}
+
+// RegisteredProviders returns every registered provider name, sorted.
+func RegisteredProviders() []string {
+	names := make([]string, 0, len(registry))
+	for name := range registry {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// registeredConfigBlocks returns the attune.yaml block name of every
+// registered provider that declares one, sorted.
+func registeredConfigBlocks() []string {
+	var blocks []string
+	for _, spec := range registry {
+		if spec.ConfigBlock != "" {
+			blocks = append(blocks, spec.ConfigBlock)
+		}
+	}
+	sort.Strings(blocks)
+	return blocks
+}
+
+// checkKindSupport fails when provider is unregistered or does not support
+// kind.
+func checkKindSupport(provider, kind string) error {
+	spec, err := LookupProvider(provider)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(spec.Kinds, kind) {
+		return unsupportedKind(provider, kind)
+	}
+	return nil
+}
+
+// snapshotRegistry returns a copy of the registry so a test can register
+// providers and restore the original set afterwards.
+func snapshotRegistry() map[string]ProviderSpec {
+	copied := make(map[string]ProviderSpec, len(registry))
+	maps.Copy(copied, registry)
+	return copied
+}
+
+// restoreRegistry replaces the registry with a snapshot.
+func restoreRegistry(snapshot map[string]ProviderSpec) {
+	registry = snapshot
+}
+
+// unsupportedKind is the error Plan and Apply return when the provider
+// handed to them lacks the capability a kind needs.
+func unsupportedKind(provider, kind string) error {
+	return fmt.Errorf("provider %q does not support kind %q", provider, kind)
+}

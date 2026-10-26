@@ -576,3 +576,30 @@ func TestAttuneStStartsWithTheCheckTime(t *testing.T) {
 		t.Fatalf("first st line %q", first)
 	}
 }
+
+// TestAddRejectsAnUnknownProviderAtSaveTime — AT2: add refuses a spec
+// naming an unregistered provider using the stored configuration's
+// default, with no flag involved. edit saves through the same
+// validateEntry call.
+func TestAddRejectsAnUnknownProviderAtSaveTime(t *testing.T) {
+	h := newHarness(t)
+	h.initAndAdd()
+	bad := filepath.Join(h.root, "bad.yaml")
+	if err := os.WriteFile(bad, []byte("provider: nope\nkind: dnsRecordSet\nzone: example.com\ntype: A\nname: bad\nttl: 300\nvalues:\n  - 192.0.2.11\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, errs := h.mustFail(1, "add", "zones/bad.yaml", bad); !strings.Contains(errs, `unknown provider "nope"; registered: azure`) {
+		t.Fatalf("add with unknown provider: %q", errs)
+	}
+	if got := lsNames(h.mustRun("ls")); len(got) != 7 {
+		t.Fatalf("refused add changed the store: %v", got)
+	}
+	good := filepath.Join(h.root, "good.yaml")
+	if err := os.WriteFile(good, []byte("provider: azure\nkind: dnsRecordSet\nzone: example.com\ntype: A\nname: good\nttl: 300\nvalues:\n  - 192.0.2.12\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.mustRun("add", "zones/good.yaml", good)
+	if out := h.mustRun("validate"); !strings.HasPrefix(out, "attune validate: OK (7 specs)") {
+		t.Fatalf("validate after add: %q", out)
+	}
+}

@@ -73,8 +73,10 @@ type Change struct {
 	Target  Target
 }
 
-// Options controls which kinds Plan considers and which prune policies apply.
+// Options controls which kinds Plan considers and which prune policies
+// apply. Provider names the provider for error messages.
 type Options struct {
+	Provider            string
 	Subscription        string
 	Kind                string
 	PruneDNS            bool
@@ -89,34 +91,6 @@ type LiveAssignment struct {
 	PrincipalID string
 	RoleID      string
 	Scope       string
-}
-
-// Provider is the live-state interface Plan/Apply reconcile against.
-type Provider interface {
-	EnsureZone(zone string) error
-	HasZone(zone string) (bool, error)
-	ListDNS(zone string) ([]DnsRecord, error)
-	PutDNS(record DnsRecord) error
-	DeleteDNS(record DnsRecord) error
-	GetGroup(name string) (*SecurityGroup, error)
-	ListGroupNames() ([]string, error)
-	PutGroup(group SecurityGroup) error
-	DeleteGroup(name string) error
-	GetApp(name string) (*AppRegistration, error)
-	ListAppNames() ([]string, error)
-	PutApp(app AppRegistration) error
-	DeleteApp(name string) error
-	ListRoleDefinitions(subscription string) ([]RoleDefinition, error)
-	PutRoleDefinition(role RoleDefinition, subscription string) error
-	DeleteRoleDefinition(name, subscription string) error
-	ResolvePrincipal(name, principalType string) (string, error)
-	ResolveRole(name, subscription string) (string, error)
-	ListRoleAssignments(scope string) ([]LiveAssignment, error)
-	PutRoleAssignment(principal, role, scope string) error
-	DeleteRoleAssignment(assignment LiveAssignment) error
-	ListResourceGroups() ([]ResourceGroup, error)
-	PutResourceGroup(group ResourceGroup) error
-	DeleteResourceGroup(name string) error
 }
 
 func wanted(options *Options, kind string) bool {
@@ -228,12 +202,18 @@ func roleDefinitionDiffs(current, desired RoleDefinition, subscription string) [
 // Plan computes create/update/delete changes for bundle against provider's
 // live state, honoring options.Kind filtering and prune policy. Kinds are
 // always processed in this fixed order: resourceGroup, securityGroup,
-// appRegistration, roleDefinition, roleAssignment, dnsRecordSet.
-func Plan(provider Provider, bundle *Bundle, options *Options) ([]Change, error) {
+// appRegistration, roleDefinition, roleAssignment, dnsRecordSet. Each kind
+// family asserts its capability interface on provider and fails when the
+// provider lacks it.
+func Plan(provider LiveProvider, bundle *Bundle, options *Options) ([]Change, error) {
 	var changes []Change
 
 	if wanted(options, "resourceGroup") && len(bundle.ResourceGroups) > 0 {
-		live, err := provider.ListResourceGroups()
+		rgs, ok := provider.(ResourceGroupProvider)
+		if !ok {
+			return nil, unsupportedKind(options.Provider, "resourceGroup")
+		}
+		live, err := rgs.ListResourceGroups()
 		if err != nil {
 			return nil, err
 		}
@@ -267,8 +247,12 @@ func Plan(provider Provider, bundle *Bundle, options *Options) ([]Change, error)
 	}
 
 	if wanted(options, "securityGroup") && len(bundle.Groups) > 0 {
+		identity, ok := provider.(IdentityProvider)
+		if !ok {
+			return nil, unsupportedKind(options.Provider, "securityGroup")
+		}
 		for _, item := range bundle.Groups {
-			current, err := provider.GetGroup(item.Name)
+			current, err := identity.GetGroup(item.Name)
 			if err != nil {
 				return nil, err
 			}
@@ -286,7 +270,7 @@ func Plan(provider Provider, bundle *Bundle, options *Options) ([]Change, error)
 			for _, item := range bundle.Groups {
 				desired[item.Name] = true
 			}
-			names, err := provider.ListGroupNames()
+			names, err := identity.ListGroupNames()
 			if err != nil {
 				return nil, err
 			}
@@ -299,8 +283,12 @@ func Plan(provider Provider, bundle *Bundle, options *Options) ([]Change, error)
 	}
 
 	if wanted(options, "appRegistration") && len(bundle.Apps) > 0 {
+		identity, ok := provider.(IdentityProvider)
+		if !ok {
+			return nil, unsupportedKind(options.Provider, "appRegistration")
+		}
 		for _, item := range bundle.Apps {
-			current, err := provider.GetApp(item.Name)
+			current, err := identity.GetApp(item.Name)
 			if err != nil {
 				return nil, err
 			}
@@ -321,7 +309,7 @@ func Plan(provider Provider, bundle *Bundle, options *Options) ([]Change, error)
 			for _, item := range bundle.Apps {
 				desired[item.Name] = true
 			}
-			names, err := provider.ListAppNames()
+			names, err := identity.ListAppNames()
 			if err != nil {
 				return nil, err
 			}
@@ -334,7 +322,11 @@ func Plan(provider Provider, bundle *Bundle, options *Options) ([]Change, error)
 	}
 
 	if wanted(options, "roleDefinition") && len(bundle.RoleDefinitions) > 0 {
-		live, err := provider.ListRoleDefinitions(options.Subscription)
+		roles, ok := provider.(RoleProvider)
+		if !ok {
+			return nil, unsupportedKind(options.Provider, "roleDefinition")
+		}
+		live, err := roles.ListRoleDefinitions(options.Subscription)
 		if err != nil {
 			return nil, err
 		}
@@ -363,13 +355,21 @@ func Plan(provider Provider, bundle *Bundle, options *Options) ([]Change, error)
 	}
 
 	if wanted(options, "roleAssignment") && len(bundle.RoleAssignments) > 0 {
-		if err := planRoleAssignments(provider, bundle, options, &changes); err != nil {
+		roles, ok := provider.(RoleProvider)
+		if !ok {
+			return nil, unsupportedKind(options.Provider, "roleAssignment")
+		}
+		if err := planRoleAssignments(roles, bundle, options, &changes); err != nil {
 			return nil, err
 		}
 	}
 
 	if wanted(options, "dnsRecordSet") && len(bundle.Dns) > 0 {
-		if err := planDNS(provider, bundle, options, &changes); err != nil {
+		dns, ok := provider.(DNSProvider)
+		if !ok {
+			return nil, unsupportedKind(options.Provider, "dnsRecordSet")
+		}
+		if err := planDNS(dns, bundle, options, &changes); err != nil {
 			return nil, err
 		}
 	}
@@ -383,7 +383,7 @@ type desiredAssignment struct {
 	roleID      string
 }
 
-func planRoleAssignments(provider Provider, bundle *Bundle, options *Options, changes *[]Change) error {
+func planRoleAssignments(provider RoleProvider, bundle *Bundle, options *Options, changes *[]Change) error {
 	desiredByScope := map[string][]desiredAssignment{}
 	var scopeOrder []string
 	for _, item := range bundle.RoleAssignments {
@@ -455,7 +455,7 @@ func planRoleAssignments(provider Provider, bundle *Bundle, options *Options, ch
 	return nil
 }
 
-func planDNS(provider Provider, bundle *Bundle, options *Options, changes *[]Change) error {
+func planDNS(provider DNSProvider, bundle *Bundle, options *Options, changes *[]Change) error {
 	desiredByZone := map[string][]DnsRecord{}
 	var zoneOrder []string
 	for _, item := range bundle.Dns {
@@ -593,56 +593,78 @@ func dnsProtected(item DnsRecord) bool {
 
 // Apply performs every planned Change against provider, in order,
 // invoking report after each successful mutation when report is non-nil.
-func Apply(provider Provider, changes []Change, subscription string, report func(Change)) error {
+// Plan only emits changes for kinds the provider supports, so a missing
+// capability here is a programming error reported by kind.
+func Apply(provider LiveProvider, changes []Change, subscription string, report func(Change)) error {
 	for _, c := range changes {
-		var err error
-		switch c.Target.Kind {
-		case TargetZone:
-			err = provider.EnsureZone(c.Target.Zone)
-		case TargetDns:
-			if c.Action == ActionDelete {
-				err = provider.DeleteDNS(c.Target.Dns)
-			} else {
-				err = provider.PutDNS(c.Target.Dns)
-			}
-		case TargetGroup:
-			if c.Action == ActionDelete {
-				err = provider.DeleteGroup(c.Target.Group.Name)
-			} else {
-				err = provider.PutGroup(c.Target.Group)
-			}
-		case TargetApp:
-			if c.Action == ActionDelete {
-				err = provider.DeleteApp(c.Target.App.Name)
-			} else {
-				err = provider.PutApp(c.Target.App)
-			}
-		case TargetRoleDefinition:
-			if c.Action == ActionDelete {
-				err = provider.DeleteRoleDefinition(c.Target.RoleDefinition.Name, subscription)
-			} else {
-				err = provider.PutRoleDefinition(c.Target.RoleDefinition, subscription)
-			}
-		case TargetRoleAssignment:
-			ra := c.Target.RoleAssignment
-			if c.Action == ActionDelete {
-				err = provider.DeleteRoleAssignment(LiveAssignment{ID: ra.ScopeID, PrincipalID: ra.PrincipalID, RoleID: ra.RoleID})
-			} else {
-				err = provider.PutRoleAssignment(ra.PrincipalID, ra.RoleID, ra.ScopeID)
-			}
-		case TargetResourceGroup:
-			if c.Action == ActionDelete {
-				err = provider.DeleteResourceGroup(c.Target.ResourceGroup.Name)
-			} else {
-				err = provider.PutResourceGroup(c.Target.ResourceGroup)
-			}
-		}
-		if err != nil {
+		if err := applyChange(provider, c, subscription); err != nil {
 			return err
 		}
 		if report != nil {
 			report(c)
 		}
+	}
+	return nil
+}
+
+// applyChange performs one Change through the capability its target needs.
+func applyChange(provider LiveProvider, c Change, subscription string) error {
+	lacks := func(capability string) error {
+		return fmt.Errorf("apply %s: provider lacks the %s capability", c.Kind, capability)
+	}
+	switch c.Target.Kind {
+	case TargetZone, TargetDns:
+		dns, ok := provider.(DNSProvider)
+		if !ok {
+			return lacks("DNS")
+		}
+		if c.Target.Kind == TargetZone {
+			return dns.EnsureZone(c.Target.Zone)
+		}
+		if c.Action == ActionDelete {
+			return dns.DeleteDNS(c.Target.Dns)
+		}
+		return dns.PutDNS(c.Target.Dns)
+	case TargetGroup, TargetApp:
+		identity, ok := provider.(IdentityProvider)
+		if !ok {
+			return lacks("identity")
+		}
+		switch {
+		case c.Target.Kind == TargetGroup && c.Action == ActionDelete:
+			return identity.DeleteGroup(c.Target.Group.Name)
+		case c.Target.Kind == TargetGroup:
+			return identity.PutGroup(c.Target.Group)
+		case c.Action == ActionDelete:
+			return identity.DeleteApp(c.Target.App.Name)
+		default:
+			return identity.PutApp(c.Target.App)
+		}
+	case TargetRoleDefinition, TargetRoleAssignment:
+		roles, ok := provider.(RoleProvider)
+		if !ok {
+			return lacks("role")
+		}
+		if c.Target.Kind == TargetRoleDefinition {
+			if c.Action == ActionDelete {
+				return roles.DeleteRoleDefinition(c.Target.RoleDefinition.Name, subscription)
+			}
+			return roles.PutRoleDefinition(c.Target.RoleDefinition, subscription)
+		}
+		ra := c.Target.RoleAssignment
+		if c.Action == ActionDelete {
+			return roles.DeleteRoleAssignment(LiveAssignment{ID: ra.ScopeID, PrincipalID: ra.PrincipalID, RoleID: ra.RoleID})
+		}
+		return roles.PutRoleAssignment(ra.PrincipalID, ra.RoleID, ra.ScopeID)
+	case TargetResourceGroup:
+		rgs, ok := provider.(ResourceGroupProvider)
+		if !ok {
+			return lacks("resource-group")
+		}
+		if c.Action == ActionDelete {
+			return rgs.DeleteResourceGroup(c.Target.ResourceGroup.Name)
+		}
+		return rgs.PutResourceGroup(c.Target.ResourceGroup)
 	}
 	return nil
 }

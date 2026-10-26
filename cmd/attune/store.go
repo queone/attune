@@ -321,12 +321,18 @@ func entryFor(all []lockbox.Entry, name string) *lockbox.Entry {
 
 // validateEntry checks content the way validate would once stored: the
 // configuration must parse, and a spec must load together with every other
-// stored spec. excludeID leaves out the entry being replaced.
+// stored spec, using the stored configuration's provider as the default
+// for specs that name none. excludeID leaves out the entry being replaced.
 func validateEntry(st *lockbox.Store, name string, content []byte, excludeID int64) error {
 	if name == configName {
 		_, err := ParseConfig(content)
 		return err
 	}
+	config, err := storedConfig(st)
+	if err != nil {
+		return err
+	}
+	defaultProvider := Resolve(config, Overrides{}).Provider
 	all, err := st.Entries()
 	if err != nil {
 		return err
@@ -346,7 +352,7 @@ func validateEntry(st *lockbox.Store, name string, content []byte, excludeID int
 		sources = append(sources, specSource{name: e.Target, content: latest.Content})
 	}
 	sources = append(sources, specSource{name: name, content: content})
-	_, err = loadSources(sources)
+	_, err = loadSources(sources, defaultProvider)
 	return err
 }
 

@@ -126,10 +126,27 @@ type AzureProvider struct {
 	transport     HTTPTransport
 	Subscription  string
 	resourceGroup string
+	account       Account
 	graphToken    string
 	graphTokenSet bool
 	armToken      string
 	armTokenSet   bool
+}
+
+var (
+	_ Provider     = (*AzureProvider)(nil)
+	_ LiveProvider = (*AzureProvider)(nil)
+)
+
+func init() {
+	Register(ProviderSpec{
+		Name:        "azure",
+		Kinds:       validKinds,
+		ConfigBlock: "azure",
+		New: func(settings Settings, _ map[string]any) (LiveProvider, error) {
+			return NewAzureProvider(settings.Subscription, settings.ResourceGroup), nil
+		},
+	})
 }
 
 // NewAzureProvider builds a provider using the real `az` CLI and network transport.
@@ -143,7 +160,8 @@ func NewAzureProviderWith(cli AzureCli, transport HTTPTransport, subscription, r
 }
 
 // Ground authenticates and, if no subscription was configured, adopts the
-// authenticated account's default subscription.
+// authenticated account's default subscription. The returned Account
+// carries the subscription the run will use.
 func (p *AzureProvider) Ground() (Account, error) {
 	account, err := p.cli.Account()
 	if err != nil {
@@ -152,7 +170,15 @@ func (p *AzureProvider) Ground() (Account, error) {
 	if p.Subscription == "" {
 		p.Subscription = account.Subscription
 	}
+	account.Subscription = p.Subscription
+	p.account = account
 	return account, nil
+}
+
+// Describe renders the non-secret diagnostic fields of the grounded target.
+func (p *AzureProvider) Describe() string {
+	return fmt.Sprintf("tenant=%s subscription=%s identity=%s resource-group=%s",
+		p.account.Tenant, p.Subscription, p.account.Identity, p.resourceGroup)
 }
 
 func (p *AzureProvider) requireDNSTarget() error {

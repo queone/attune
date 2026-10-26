@@ -80,7 +80,7 @@ func TestHelpOutput(t *testing.T) {
 			}
 			last = idx
 		}
-		for _, want := range []string{"(p|plan)", "-d, --diagnostic", "-t, --store PATH", "  key show", "  rename OLD NEW", "  edit NAME", "-b, --by FIELD", "macOS only", "status of the store, key, entries, and last save"} {
+		for _, want := range []string{"(p|plan)", "-d, --diagnostic", "-t, --store PATH", "-P, --provider NAME", "Default provider for specs that omit provider", "  key show", "  rename OLD NEW", "  edit NAME", "-b, --by FIELD", "macOS only", "status of the store, key, entries, and last save"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("%v: help output missing %q", args, want)
 			}
@@ -378,7 +378,7 @@ func TestPlanBlockRendersYellowProspectiveWording(t *testing.T) {
 		{Kind: "securityGroup", Action: ActionUpdate, Key: "securityGroup|eng", Summary: "owners or members differ"},
 		{Kind: "appRegistration", Action: ActionDelete, Key: "appRegistration|old", Summary: "absent from specs"},
 	}
-	out := renderPlanBlock(changes, false)
+	out := renderPlanBlock("azure", changes, false)
 	lines := strings.Split(out, "\n")
 	if lines[0] != "attune plan: provider=azure" {
 		t.Errorf("header = %q, want uncolored %q", lines[0], "attune plan: provider=azure")
@@ -397,7 +397,7 @@ func TestPlanBlockRendersYellowProspectiveWording(t *testing.T) {
 			t.Errorf("plain output %q missing %q", plain, want)
 		}
 	}
-	if zero := color.ClearCode(renderPlanBlock(nil, false)); !strings.Contains(zero, "0 change(s) would be made.") {
+	if zero := color.ClearCode(renderPlanBlock("azure", nil, false)); !strings.Contains(zero, "0 change(s) would be made.") {
 		t.Errorf("zero-change plan = %q, want prospective zero trailer", zero)
 	}
 }
@@ -405,11 +405,11 @@ func TestPlanBlockRendersYellowProspectiveWording(t *testing.T) {
 func TestApplyConfirmationRendersGreenPastTense(t *testing.T) {
 	restore := color.SetEnabled(true)
 	defer restore()
-	if got := color.ClearCode(applyHeader()); got != "attune apply: provider=azure" {
+	if got := color.ClearCode(applyHeader("azure")); got != "attune apply: provider=azure" {
 		t.Errorf("applyHeader = %q, want %q", got, "attune apply: provider=azure")
 	}
-	if !strings.HasPrefix(applyHeader(), greenCode) {
-		t.Errorf("applyHeader = %q, want green prefix", applyHeader())
+	if !strings.HasPrefix(applyHeader("azure"), greenCode) {
+		t.Errorf("applyHeader = %q, want green prefix", applyHeader("azure"))
 	}
 	verbs := map[Action]string{ActionCreate: "created", ActionUpdate: "updated", ActionDelete: "deleted"}
 	for action, verb := range verbs {
@@ -439,8 +439,8 @@ func TestRenderingUncoloredWhenColorDisabled(t *testing.T) {
 	change := Change{Kind: "dnsRecordSet", Action: ActionCreate, Key: "dnsRecordSet|www", Summary: "missing",
 		Diffs: []FieldDiff{{Field: "ttl", Old: "300", New: "600"}}}
 	for name, out := range map[string]string{
-		"plan block":    renderPlanBlock([]Change{change}, true),
-		"apply header":  applyHeader(),
+		"plan block":    renderPlanBlock("azure", []Change{change}, true),
+		"apply header":  applyHeader("azure"),
 		"applied line":  renderAppliedLine(change),
 		"apply trailer": renderApplyTrailer(1),
 	} {
@@ -453,7 +453,7 @@ func TestRenderingUncoloredWhenColorDisabled(t *testing.T) {
 func TestZeroChangeApplyTrailerHasNoChangeLines(t *testing.T) {
 	restore := color.SetEnabled(true)
 	defer restore()
-	got := color.ClearCode(applyHeader() + "\n" + renderApplyTrailer(0))
+	got := color.ClearCode(applyHeader("azure") + "\n" + renderApplyTrailer(0))
 	want := "attune apply: provider=azure\n\n0 change(s) made.\n"
 	if got != want {
 		t.Errorf("zero-change apply block = %q, want %q", got, want)
@@ -461,10 +461,10 @@ func TestZeroChangeApplyTrailerHasNoChangeLines(t *testing.T) {
 }
 
 func TestGroundingAndValidateLinesAppendContentVersion(t *testing.T) {
-	if got, want := groundingLine(6, "v1.2.3"), "attune: provider=azure specs=6 authenticated=yes content=v1.2.3\n"; got != want {
+	if got, want := groundingLine("azure", 6, "v1.2.3"), "attune: provider=azure specs=6 authenticated=yes content=v1.2.3\n"; got != want {
 		t.Errorf("groundingLine with version = %q, want %q", got, want)
 	}
-	if got, want := groundingLine(6, ""), "attune: provider=azure specs=6 authenticated=yes\n"; got != want {
+	if got, want := groundingLine("azure", 6, ""), "attune: provider=azure specs=6 authenticated=yes\n"; got != want {
 		t.Errorf("groundingLine without version = %q, want %q", got, want)
 	}
 	if got, want := validateLine(6, "v1.2.3"), "attune validate: OK (6 specs) content=v1.2.3\n"; got != want {
@@ -556,7 +556,7 @@ func TestVerbosePlanBlockShowsFieldDiffs(t *testing.T) {
 			{Field: "tag config_version", Old: "0.13.0", New: "0.14.0"},
 		},
 	}}
-	verbose := renderPlanBlock(changes, true)
+	verbose := renderPlanBlock("azure", changes, true)
 	plain := color.ClearCode(verbose)
 	for _, want := range []string{"      location: eastus -> westus2", "      tag config_version: 0.13.0 -> 0.14.0"} {
 		if !strings.Contains(plain, want) {
@@ -568,7 +568,7 @@ func TestVerbosePlanBlockShowsFieldDiffs(t *testing.T) {
 			t.Errorf("diff line %q not yellow", line)
 		}
 	}
-	terse := renderPlanBlock(changes, false)
+	terse := renderPlanBlock("azure", changes, false)
 	if strings.Contains(color.ClearCode(terse), "location: eastus") {
 		t.Errorf("default output leaked diff detail: %q", terse)
 	}
@@ -598,5 +598,72 @@ func TestRenderFieldDiffForms(t *testing.T) {
 func TestHelpDocFollowsTheStandard(t *testing.T) {
 	if err := helpDoc().Check(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestProviderFlagMustNameARegisteredProvider — AT2: -P nope fails before
+// any live call and lists the registered providers; -P azure validates.
+func TestProviderFlagMustNameARegisteredProvider(t *testing.T) {
+	h := newHarness(t)
+	h.initAndAdd()
+	_, errs := h.mustFail(1, "validate", "-P", "nope")
+	if !strings.Contains(errs, `unknown provider "nope"; registered: azure`) {
+		t.Errorf("stderr = %q", errs)
+	}
+	if out := h.mustRun("validate", "-P", "azure"); !strings.HasPrefix(out, "attune validate: OK (6 specs)") {
+		t.Errorf("stdout = %q", out)
+	}
+}
+
+// TestLiveRunPrintsOneBlockPerProvider — AT5: a bundle spanning two
+// providers grounds and plans both in name order, then applies both, with
+// one grounding line, one diagnostic line, one plan block, and one apply
+// block each.
+func TestLiveRunPrintsOneBlockPerProvider(t *testing.T) {
+	restore := color.SetEnabled(false)
+	defer restore()
+	snapshot := snapshotRegistry()
+	t.Cleanup(func() { restoreRegistry(snapshot) })
+	for _, name := range []string{"beta", "alpha"} {
+		Register(ProviderSpec{Name: name, Kinds: validKinds, New: func(Settings, map[string]any) (LiveProvider, error) {
+			return &fakeProvider{name: name}, nil
+		}})
+	}
+	record := func(provider, host string) DnsRecord {
+		return DnsRecord{Provider: provider, Zone: "example.com", RecordType: "A", Name: host, TTL: 300, Values: []string{"192.0.2.10"}}
+	}
+	bundle := &Bundle{Dns: []DnsRecord{record("beta", "b1"), record("alpha", "a1"), record("beta", "b2")}}
+	var out, errb strings.Builder
+	a := &app{stdout: &out, stderr: &errb}
+	settings := Settings{ContentVersion: "v9", Diagnostic: true, PruneDNS: true}
+	if code := a.runLive(cmdApply, settings, nil, bundle, "/x/store"); code != 0 {
+		t.Fatalf("runLive exit %d\nstdout: %s\nstderr: %s", code, out.String(), errb.String())
+	}
+	wantErr := "attune: provider=alpha specs=1 authenticated=yes content=v9\n" +
+		"attune: diagnostic fake=alpha store=/x/store\n" +
+		"attune: provider=beta specs=2 authenticated=yes content=v9\n" +
+		"attune: diagnostic fake=beta store=/x/store\n"
+	if errb.String() != wantErr {
+		t.Errorf("stderr = %q\nwant %q", errb.String(), wantErr)
+	}
+	stdout := out.String()
+	order := []string{
+		"attune plan: provider=alpha\n", "example.com|A|a1", "1 change(s) would be made.",
+		"attune plan: provider=beta\n", "example.com|A|b1", "example.com|A|b2", "2 change(s) would be made.",
+		"attune apply: provider=alpha\n", "created", "1 change(s) made.",
+		"attune apply: provider=beta\n", "2 change(s) made.",
+	}
+	last := -1
+	for _, want := range order {
+		idx := strings.Index(stdout, want)
+		if idx < 0 || idx < last {
+			t.Errorf("stdout lacks %q in order:\n%s", want, stdout)
+		}
+		if idx >= 0 {
+			last = idx
+		}
+	}
+	if strings.Index(stdout, "attune apply: provider=alpha") < strings.Index(stdout, "attune plan: provider=beta") {
+		t.Errorf("apply started before every provider was planned:\n%s", stdout)
 	}
 }

@@ -20,7 +20,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.7.2"
+	programVersion = "1.8.0"
 )
 
 var validKinds = []string{
@@ -164,15 +164,15 @@ func (a *app) reconcile(cmd commandKind, args []string) int {
 		return 1
 	}
 	settings := Resolve(config, overrides)
-	if settings.Provider != "azure" {
-		a.errorf("unsupported provider %q; use `azure`", settings.Provider)
+	if _, err := LookupProvider(settings.Provider); err != nil {
+		a.errorf("%s", err)
 		return 1
 	}
 	if settings.Kind != "" && !slices.Contains(validKinds, settings.Kind) {
 		a.errorf("unknown kind %q", settings.Kind)
 		return 1
 	}
-	bundle, err := loadStoreBundle(st)
+	bundle, err := loadStoreBundle(st, settings.Provider)
 	if err != nil {
 		a.errorf("validate specs: %s", err)
 		return 1
@@ -185,43 +185,78 @@ func (a *app) reconcile(cmd commandKind, args []string) int {
 		fmt.Fprint(a.stdout, validateLine(bundle.Len(), settings.ContentVersion))
 		return 0
 	}
+	return a.runLive(cmd, settings, config, bundle, ref.path)
+}
 
-	provider := NewAzureProvider(settings.Subscription, settings.ResourceGroup)
-	account, err := provider.Ground()
-	if err != nil {
-		a.errorf("authenticate provider: %s", err)
-		return 1
-	}
-	fmt.Fprint(a.stderr, groundingLine(bundle.Len(), settings.ContentVersion))
-	if settings.Diagnostic {
-		fmt.Fprintf(a.stderr, "attune: diagnostic tenant=%s subscription=%s identity=%s resource-group=%s %s\n",
-			account.Tenant, provider.Subscription, account.Identity, settings.ResourceGroup, "store="+ref.path)
-	}
+// plannedProvider is one provider's grounded state and planned changes.
+type plannedProvider struct {
+	name     string
+	provider LiveProvider
+	account  Account
+	changes  []Change
+}
 
-	options := &Options{
-		Subscription:        provider.Subscription,
-		Kind:                settings.Kind,
-		PruneDNS:            settings.PruneDNS,
-		PruneIdentities:     settings.PruneIdentities,
-		PruneRoles:          settings.PruneRoles,
-		PruneResourceGroups: settings.PruneResourceGroups,
+// runLive grounds and plans every provider the bundle uses, in provider
+// name order, printing one grounding line and one plan block each. Only
+// then does apply run, one confirmation block per provider in the same
+// order, so a provider that cannot be reached stops the run before any
+// other provider is changed.
+func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle *Bundle, storePath string) int {
+	var plans []plannedProvider
+	for _, name := range bundle.Providers() {
+		spec, err := LookupProvider(name)
+		if err != nil {
+			a.errorf("%s", err)
+			return 1
+		}
+		var block map[string]any
+		if config != nil {
+			block = config.ProviderBlocks[spec.ConfigBlock]
+		}
+		provider, err := spec.New(settings, block)
+		if err != nil {
+			a.errorf("configure provider %s: %s", name, err)
+			return 1
+		}
+		part := bundle.ForProvider(name)
+		account, err := provider.Ground()
+		if err != nil {
+			a.errorf("authenticate provider: %s", err)
+			return 1
+		}
+		fmt.Fprint(a.stderr, groundingLine(name, part.Len(), settings.ContentVersion))
+		if settings.Diagnostic {
+			fmt.Fprintf(a.stderr, "attune: diagnostic %s store=%s\n", provider.Describe(), storePath)
+		}
+		options := &Options{
+			Provider:            name,
+			Subscription:        account.Subscription,
+			Kind:                settings.Kind,
+			PruneDNS:            settings.PruneDNS,
+			PruneIdentities:     settings.PruneIdentities,
+			PruneRoles:          settings.PruneRoles,
+			PruneResourceGroups: settings.PruneResourceGroups,
+		}
+		changes, err := Plan(provider, part, options)
+		if err != nil {
+			a.errorf("plan provider changes: %s", err)
+			return 1
+		}
+		fmt.Fprint(a.stdout, renderPlanBlock(name, changes, settings.Verbose))
+		plans = append(plans, plannedProvider{name: name, provider: provider, account: account, changes: changes})
 	}
-	changes, err := Plan(provider, bundle, options)
-	if err != nil {
-		a.errorf("plan provider changes: %s", err)
-		return 1
+	if cmd != cmdApply {
+		return 0
 	}
-	fmt.Fprint(a.stdout, renderPlanBlock(changes, settings.Verbose))
-
-	if cmd == cmdApply {
-		fmt.Fprintln(a.stdout, applyHeader())
-		if err := Apply(provider, changes, provider.Subscription, func(c Change) {
+	for _, p := range plans {
+		fmt.Fprintln(a.stdout, applyHeader(p.name))
+		if err := Apply(p.provider, p.changes, p.account.Subscription, func(c Change) {
 			fmt.Fprintln(a.stdout, renderAppliedLine(c))
 		}); err != nil {
 			a.errorf("apply provider change: %s", err)
 			return 1
 		}
-		fmt.Fprint(a.stdout, renderApplyTrailer(len(changes)))
+		fmt.Fprint(a.stdout, renderApplyTrailer(len(p.changes)))
 	}
 	return 0
 }
@@ -250,8 +285,9 @@ func storedConfig(st *lockbox.Store) (*Config, error) {
 }
 
 // loadStoreBundle parses every stored spec, attune.yaml excepted, exactly
-// as directory mode parses files.
-func loadStoreBundle(st *lockbox.Store) (*Bundle, error) {
+// as directory mode parses files, with defaultProvider for specs that name
+// no provider.
+func loadStoreBundle(st *lockbox.Store, defaultProvider string) (*Bundle, error) {
 	entries, err := st.Entries()
 	if err != nil {
 		return nil, err
@@ -270,7 +306,7 @@ func loadStoreBundle(st *lockbox.Store) (*Bundle, error) {
 		}
 		sources = append(sources, specSource{name: e.Target, content: latest.Content})
 	}
-	return loadSources(sources)
+	return loadSources(sources, defaultProvider)
 }
 
 // changeSymbol maps an Action to its one-character change marker.
@@ -300,13 +336,13 @@ func pastTense(a Action) string {
 	}
 }
 
-// renderPlanBlock renders the prospective change block: an uncolored
-// header, one yellow line per change, and the yellow "would be made"
-// trailer. With verbose set, each change's field-level diffs follow its
-// line as indented yellow lines.
-func renderPlanBlock(changes []Change, verbose bool) string {
+// renderPlanBlock renders the prospective change block for one provider:
+// an uncolored header naming it, one yellow line per change, and the
+// yellow "would be made" trailer. With verbose set, each change's
+// field-level diffs follow its line as indented yellow lines.
+func renderPlanBlock(provider string, changes []Change, verbose bool) string {
 	var b strings.Builder
-	b.WriteString("attune plan: provider=azure\n")
+	b.WriteString("attune plan: provider=" + provider + "\n")
 	for _, c := range changes {
 		line := fmt.Sprintf("  %s %-6s %-15s %s  %s", changeSymbol(c.Action), c.Action.String(), c.Kind, c.Key, c.Summary)
 		b.WriteString(color.Yel5(line) + "\n")
@@ -334,10 +370,10 @@ func renderFieldDiff(d FieldDiff) string {
 	}
 }
 
-// applyHeader renders the green header that opens the apply confirmation
-// block.
-func applyHeader() string {
-	return color.Grn5("attune apply: provider=azure")
+// applyHeader renders the green header that opens one provider's apply
+// confirmation block.
+func applyHeader(provider string) string {
+	return color.Grn5("attune apply: provider=" + provider)
 }
 
 // renderAppliedLine renders one green confirmation line, mirroring the
@@ -367,10 +403,11 @@ func validateLine(specs int, contentVersion string) string {
 	return fmt.Sprintf("attune validate: OK (%d specs)%s\n", specs, contentSuffix(contentVersion))
 }
 
-// groundingLine renders the non-secret grounding line every live run
-// prints, appending the declared content version when one is set.
-func groundingLine(specs int, contentVersion string) string {
-	return fmt.Sprintf("attune: provider=azure specs=%d authenticated=yes%s\n", specs, contentSuffix(contentVersion))
+// groundingLine renders the non-secret grounding line a live run prints
+// for each provider, appending the declared content version when one is
+// set.
+func groundingLine(provider string, specs int, contentVersion string) string {
+	return fmt.Sprintf("attune: provider=%s specs=%d authenticated=yes%s\n", provider, specs, contentSuffix(contentVersion))
 }
 
 // parseFlags parses the reconciler flag surface. String flags (-t/-P/-g/-S/
@@ -531,7 +568,7 @@ func helpDoc() help.Doc {
 			}},
 			{Title: "Options", Rows: []help.Row{
 				{Form: "-t, --store PATH", Meaning: "Store file for this command; init -t also remembers it"},
-				{Form: "-P, --provider NAME", Meaning: "Provider name; azure is the only one"},
+				{Form: "-P, --provider NAME", Meaning: "Default provider for specs that omit provider"},
 				{Form: "-S, --subscription ID", Meaning: "Azure subscription for live commands"},
 				{Form: "-g, --resource-group NAME", Meaning: "Azure resource group for live commands"},
 				{Form: "-k, --kind KIND", Meaning: "Limit plan and apply to one spec kind"},

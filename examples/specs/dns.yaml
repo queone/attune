@@ -1,5 +1,6 @@
 # Synthetic DNS intent using IANA and TEST-NET documentation values.
 kind: dnsRecordSet
+provider: azure
 zone: example.com
 type: A
 name: docs

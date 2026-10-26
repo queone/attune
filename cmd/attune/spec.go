@@ -236,9 +236,11 @@ type specSource struct {
 }
 
 // loadSources parses each source as exactly one strictly validated spec
-// document and returns the combined Bundle. Duplicate resource keys are
+// document and returns the combined Bundle. A spec's optional provider
+// field names its registered provider; a spec without one uses
+// defaultProvider. A duplicate resource key within one provider is
 // rejected. It is the parser behind both directory and store mode.
-func loadSources(sources []specSource) (*Bundle, error) {
+func loadSources(sources []specSource, defaultProvider string) (*Bundle, error) {
 	bundle := &Bundle{}
 	keys := map[string]bool{}
 	for _, src := range sources {
@@ -266,22 +268,34 @@ func loadSources(sources []specSource) (*Bundle, error) {
 		if err != nil {
 			return nil, err
 		}
-		resourceKey, err := loadSpecInto(bundle, kind, m)
+		provider, err := optionalString(m, "provider")
 		if err != nil {
 			return nil, err
 		}
-		if keys[resourceKey] {
+		if provider == "" {
+			provider = defaultProvider
+		}
+		if err := checkKindSupport(provider, kind); err != nil {
+			return nil, err
+		}
+		resourceKey, err := loadSpecInto(bundle, kind, provider, m)
+		if err != nil {
+			return nil, err
+		}
+		if keys[provider+"|"+resourceKey] {
 			return nil, fmt.Errorf("duplicate resource key %q", resourceKey)
 		}
-		keys[resourceKey] = true
+		keys[provider+"|"+resourceKey] = true
 	}
 	return bundle, nil
 }
 
-func loadSpecInto(bundle *Bundle, kind string, m map[string]any) (string, error) {
+// loadSpecInto parses one spec of kind into bundle, tagging it with
+// provider, and returns its resource key.
+func loadSpecInto(bundle *Bundle, kind, provider string, m map[string]any) (string, error) {
 	switch kind {
 	case "dnsRecordSet":
-		if err := rejectUnknown(m, []string{"kind", "zone", "type", "name", "ttl", "values"}, ""); err != nil {
+		if err := rejectUnknown(m, []string{"kind", "provider", "zone", "type", "name", "ttl", "values"}, ""); err != nil {
 			return "", err
 		}
 		zone, err := requiredString(m, "zone")
@@ -307,12 +321,12 @@ func loadSpecInto(bundle *Bundle, kind string, m map[string]any) (string, error)
 		if len(values) == 0 {
 			return "", fmt.Errorf("dnsRecordSet values must not be empty")
 		}
-		item := DnsRecord{Zone: zone, RecordType: recordType, Name: name, TTL: ttl, Values: values}
+		item := DnsRecord{Provider: provider, Zone: zone, RecordType: recordType, Name: name, TTL: ttl, Values: values}
 		bundle.Dns = append(bundle.Dns, item)
 		return item.Key(), nil
 
 	case "securityGroup":
-		if err := rejectUnknown(m, []string{"kind", "name", "owners", "members"}, ""); err != nil {
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "owners", "members"}, ""); err != nil {
 			return "", err
 		}
 		name, err := requiredString(m, "name")
@@ -327,12 +341,12 @@ func loadSpecInto(bundle *Bundle, kind string, m map[string]any) (string, error)
 		if err != nil {
 			return "", err
 		}
-		item := SecurityGroup{Name: name, Owners: owners, Members: members}
+		item := SecurityGroup{Provider: provider, Name: name, Owners: owners, Members: members}
 		bundle.Groups = append(bundle.Groups, item)
 		return "securityGroup|" + item.Name, nil
 
 	case "appRegistration":
-		if err := rejectUnknown(m, []string{"kind", "name", "owners", "servicePrincipal"}, ""); err != nil {
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "owners", "servicePrincipal"}, ""); err != nil {
 			return "", err
 		}
 		name, err := requiredString(m, "name")
@@ -347,12 +361,12 @@ func loadSpecInto(bundle *Bundle, kind string, m map[string]any) (string, error)
 		if err != nil {
 			return "", err
 		}
-		item := AppRegistration{Name: name, Owners: owners, ServicePrincipal: servicePrincipal != nil && *servicePrincipal}
+		item := AppRegistration{Provider: provider, Name: name, Owners: owners, ServicePrincipal: servicePrincipal != nil && *servicePrincipal}
 		bundle.Apps = append(bundle.Apps, item)
 		return "appRegistration|" + item.Name, nil
 
 	case "roleDefinition":
-		if err := rejectUnknown(m, []string{"kind", "name", "description", "assignableScopes", "actions", "notActions", "dataActions", "notDataActions"}, ""); err != nil {
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "description", "assignableScopes", "actions", "notActions", "dataActions", "notDataActions"}, ""); err != nil {
 			return "", err
 		}
 		name, err := requiredString(m, "name")
@@ -384,6 +398,7 @@ func loadSpecInto(bundle *Bundle, kind string, m map[string]any) (string, error)
 			return "", err
 		}
 		item := RoleDefinition{
+			Provider:         provider,
 			Name:             name,
 			Description:      description,
 			AssignableScopes: assignableScopes,
@@ -396,7 +411,7 @@ func loadSpecInto(bundle *Bundle, kind string, m map[string]any) (string, error)
 		return "roleDefinition|" + item.Name, nil
 
 	case "roleAssignment":
-		if err := rejectUnknown(m, []string{"kind", "principal", "principalType", "role", "scope"}, ""); err != nil {
+		if err := rejectUnknown(m, []string{"kind", "provider", "principal", "principalType", "role", "scope"}, ""); err != nil {
 			return "", err
 		}
 		principal, err := requiredString(m, "principal")
@@ -418,12 +433,12 @@ func loadSpecInto(bundle *Bundle, kind string, m map[string]any) (string, error)
 		if err != nil {
 			return "", err
 		}
-		item := RoleAssignment{Principal: principal, PrincipalType: principalType, Role: role, Scope: scope}
+		item := RoleAssignment{Provider: provider, Principal: principal, PrincipalType: principalType, Role: role, Scope: scope}
 		bundle.RoleAssignments = append(bundle.RoleAssignments, item)
 		return fmt.Sprintf("roleAssignment|%s|%s|%+v", item.Principal, item.Role, item.Scope), nil
 
 	case "resourceGroup":
-		if err := rejectUnknown(m, []string{"kind", "name", "location", "tags"}, ""); err != nil {
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "location", "tags"}, ""); err != nil {
 			return "", err
 		}
 		name, err := requiredString(m, "name")
@@ -438,7 +453,7 @@ func loadSpecInto(bundle *Bundle, kind string, m map[string]any) (string, error)
 		if err != nil {
 			return "", err
 		}
-		item := ResourceGroup{Name: name, Location: location, Tags: tags}
+		item := ResourceGroup{Provider: provider, Name: name, Location: location, Tags: tags}
 		bundle.ResourceGroups = append(bundle.ResourceGroups, item)
 		return "resourceGroup|" + item.Name, nil
 

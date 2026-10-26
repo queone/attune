@@ -6,8 +6,11 @@ import (
 	"strings"
 )
 
-// DnsRecord is a provider-neutral DNS record set.
+// DnsRecord is a provider-neutral DNS record set. Provider names the
+// registered provider a desired record belongs to; live records leave it
+// empty.
 type DnsRecord struct {
+	Provider   string
 	Zone       string
 	RecordType string
 	Name       string
@@ -45,13 +48,15 @@ func (r DnsRecord) SameData(other DnsRecord) bool {
 
 // SecurityGroup is a security group with owner and member directory objects.
 type SecurityGroup struct {
-	Name    string
-	Owners  []string
-	Members []string
+	Provider string
+	Name     string
+	Owners   []string
+	Members  []string
 }
 
 // AppRegistration is an application registration.
 type AppRegistration struct {
+	Provider         string
 	Name             string
 	Owners           []string
 	ServicePrincipal bool
@@ -93,6 +98,7 @@ func (s Scope) ArmID(defaultSubscription string) (string, error) {
 
 // RoleDefinition is a custom RBAC role definition.
 type RoleDefinition struct {
+	Provider         string
 	Name             string
 	Description      string
 	AssignableScopes []Scope
@@ -104,6 +110,7 @@ type RoleDefinition struct {
 
 // RoleAssignment is a role assignment.
 type RoleAssignment struct {
+	Provider      string
 	Principal     string
 	PrincipalType string
 	Role          string
@@ -112,6 +119,7 @@ type RoleAssignment struct {
 
 // ResourceGroup is a resource group whose declared tags use merge semantics.
 type ResourceGroup struct {
+	Provider string
 	Name     string
 	Location string
 	Tags     map[string]string
@@ -135,6 +143,73 @@ func (b Bundle) Len() int {
 // IsEmpty reports whether the bundle has no specs of any kind.
 func (b Bundle) IsEmpty() bool {
 	return b.Len() == 0
+}
+
+// Providers returns the distinct provider names the bundle's specs use,
+// sorted, so a live run visits providers in a stable order.
+func (b Bundle) Providers() []string {
+	seen := map[string]bool{}
+	for _, item := range b.Dns {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.Groups {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.Apps {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.RoleDefinitions {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.RoleAssignments {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.ResourceGroups {
+		seen[item.Provider] = true
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ForProvider returns the subset of the bundle whose specs name provider,
+// preserving each kind's order.
+func (b Bundle) ForProvider(provider string) *Bundle {
+	part := &Bundle{}
+	for _, item := range b.Dns {
+		if item.Provider == provider {
+			part.Dns = append(part.Dns, item)
+		}
+	}
+	for _, item := range b.Groups {
+		if item.Provider == provider {
+			part.Groups = append(part.Groups, item)
+		}
+	}
+	for _, item := range b.Apps {
+		if item.Provider == provider {
+			part.Apps = append(part.Apps, item)
+		}
+	}
+	for _, item := range b.RoleDefinitions {
+		if item.Provider == provider {
+			part.RoleDefinitions = append(part.RoleDefinitions, item)
+		}
+	}
+	for _, item := range b.RoleAssignments {
+		if item.Provider == provider {
+			part.RoleAssignments = append(part.RoleAssignments, item)
+		}
+	}
+	for _, item := range b.ResourceGroups {
+		if item.Provider == provider {
+			part.ResourceGroups = append(part.ResourceGroups, item)
+		}
+	}
+	return part
 }
 
 // normalized returns a deduplicated, sorted copy of values.

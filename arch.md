@@ -6,7 +6,7 @@ attune keeps Azure DNS, security groups, app registrations, role definitions, ro
 
 ## System Summary
 
-attune reads specs and `attune.yaml` from its encrypted store and validates them offline. For `plan` and `apply` it reads live Azure Resource Manager and Microsoft Graph state, prints the changes, and applies the reviewed ones.
+attune reads specs and `attune.yaml` from its encrypted store and validates them offline. For `plan` and `apply` it groups the specs by provider, reads each provider's live state (Azure Resource Manager and Microsoft Graph for `azure`), prints the changes, and applies the reviewed ones.
 
 ## Current Platform
 
@@ -17,6 +17,7 @@ attune reads specs and `attune.yaml` from its encrypted store and validates them
 - `cmd/attune/main.go`: help, flags, and the validate, plan, and apply flow
 - `spec.go`, `config.go`, `model.go`: spec parsing, configuration precedence, and the resource model
 - `reconcile.go`: change planning per resource type
+- `provider.go`: the provider registry and the capability interfaces (`DNSProvider`, `IdentityProvider`, `RoleProvider`, `ResourceGroupProvider`) a provider implements
 - `azure.go`: the ARM and Graph provider
 - `store.go`, `key.go`, `edit.go`, `render.go`: the store, its key, `edit`, and `render` and `cat`
 - `github.com/queone/gkit/lockbox`: the encrypted store and key store
@@ -44,9 +45,10 @@ Integrated audit adoption is the only command-mediated phase exception. It can a
 
 - record stable system decisions here
 - prefer durable structure and interfaces over transient implementation detail
-- attune authenticates through the local `az` CLI and never keeps its own credential store.
+- Specs pick their provider by name; the registry owns each provider's name, kinds, `attune.yaml` block, and constructor, so adding a provider touches only its own file plus one registry entry.
+- Each provider owns its credential source and origin allowlist. The Azure provider authenticates through the local `az` CLI and never keeps its own credential store.
 - It writes no local state, cache, or telemetry beyond its store, the remembered store path, `render` output, and `edit`'s private temporary file.
-- Requests are restricted to an ARM and Graph origin allowlist, and non-2xx response bodies are redacted wholesale before any diagnostic or error message.
+- The Azure provider restricts requests to an ARM and Graph origin allowlist, and non-2xx response bodies are redacted wholesale before any diagnostic or error message.
 - Role-assignment and role-definition IDs are derived deterministically (SHA1-based UUIDv5), to stay stable across repeated `apply` runs and compatible with resources that rkit's attune created.
 - The store is lockbox's sealed SQLite file with its own key under the `attune` Keychain service. Its file starts with the `MACFIT` format tag, which must not change.
 - DNS pruning defaults on. Identity, role, and resource-group pruning default off.
