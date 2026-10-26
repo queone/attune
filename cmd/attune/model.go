@@ -139,12 +139,14 @@ type Bundle struct {
 	Firewalls       []Firewall
 	Instances       []Instance
 	Addresses       []StaticAddress
+	Budgets         []Budget
+	HealthChecks    []HealthCheck
 }
 
 // Len returns the total number of specs across every kind.
 func (b Bundle) Len() int {
 	return len(b.Dns) + len(b.Groups) + len(b.Apps) + len(b.RoleDefinitions) + len(b.RoleAssignments) + len(b.ResourceGroups) +
-		len(b.IamRoles) + len(b.Buckets) + len(b.Firewalls) + len(b.Instances) + len(b.Addresses)
+		len(b.IamRoles) + len(b.Buckets) + len(b.Firewalls) + len(b.Instances) + len(b.Addresses) + len(b.Budgets) + len(b.HealthChecks)
 }
 
 // IsEmpty reports whether the bundle has no specs of any kind.
@@ -187,6 +189,12 @@ func (b Bundle) Providers() []string {
 		seen[item.Provider] = true
 	}
 	for _, item := range b.Addresses {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.Budgets {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.HealthChecks {
 		seen[item.Provider] = true
 	}
 	names := make([]string, 0, len(seen))
@@ -254,6 +262,16 @@ func (b Bundle) ForProvider(provider string) *Bundle {
 	for _, item := range b.Addresses {
 		if item.Provider == provider {
 			part.Addresses = append(part.Addresses, item)
+		}
+	}
+	for _, item := range b.Budgets {
+		if item.Provider == provider {
+			part.Budgets = append(part.Budgets, item)
+		}
+	}
+	for _, item := range b.HealthChecks {
+		if item.Provider == provider {
+			part.HealthChecks = append(part.HealthChecks, item)
 		}
 	}
 	return part
@@ -448,6 +466,232 @@ func samePolicies(a, b map[string]any) bool {
 	for name, doc := range a {
 		other, ok := b[name]
 		if !ok || canonicalJSON(doc) != canonicalJSON(other) {
+			return false
+		}
+	}
+	return true
+}
+
+// Reference names another spec's live output inside a value, written as
+// `${kind:name:field}`. A value is either plain text or exactly one
+// reference.
+type Reference struct {
+	Kind  string
+	Name  string
+	Field string
+}
+
+func (r Reference) String() string { return "${" + r.Kind + ":" + r.Name + ":" + r.Field + "}" }
+
+// referenceOutputs lists the fields attune can read from each kind's live
+// state, so a reference can be checked offline.
+var referenceOutputs = map[string][]string{
+	"staticAddress": {"publicIp"},
+	"instance":      {"id"},
+}
+
+// parseReference reads a value. It returns ok=false for plain text, the
+// reference for a well-formed `${kind:name:field}`, and an error for text
+// that opens `${` without being one.
+func parseReference(value string) (Reference, bool, error) {
+	if !strings.Contains(value, "${") {
+		return Reference{}, false, nil
+	}
+	if !strings.HasPrefix(value, "${") || !strings.HasSuffix(value, "}") || strings.Count(value, "${") != 1 {
+		return Reference{}, false, fmt.Errorf("value %q is not a reference of the form ${kind:name:field}", value)
+	}
+	parts := strings.Split(value[2:len(value)-1], ":")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return Reference{}, false, fmt.Errorf("value %q is not a reference of the form ${kind:name:field}", value)
+	}
+	return Reference{Kind: parts[0], Name: parts[1], Field: parts[2]}, true, nil
+}
+
+// Outputs holds the live outputs a run has learned, keyed by reference, and
+// which kinds it has already listed to learn them.
+type Outputs struct {
+	values map[string]string
+	listed map[string]bool
+}
+
+// NewOutputs returns an empty output set.
+func NewOutputs() *Outputs {
+	return &Outputs{values: map[string]string{}, listed: map[string]bool{}}
+}
+
+// Record stores one output when value is non-empty.
+func (o *Outputs) Record(kind, name, field, value string) {
+	if value != "" {
+		o.values[Reference{Kind: kind, Name: name, Field: field}.String()] = value
+	}
+}
+
+// Resolve substitutes every reference in values that has a recorded output
+// and returns the references that do not, leaving those values as written.
+func (o *Outputs) Resolve(values []string) ([]string, []Reference) {
+	resolved := make([]string, 0, len(values))
+	var pending []Reference
+	for _, value := range values {
+		ref, ok, err := parseReference(value)
+		if err != nil || !ok {
+			resolved = append(resolved, value)
+			continue
+		}
+		if output, found := o.values[ref.String()]; found {
+			resolved = append(resolved, output)
+		} else {
+			resolved = append(resolved, value)
+			pending = append(pending, ref)
+		}
+	}
+	return resolved, pending
+}
+
+// referencedKinds returns the kinds the bundle's referencing fields name:
+// record values and health check targets.
+func (b Bundle) referencedKinds() map[string]bool {
+	kinds := map[string]bool{}
+	for _, item := range b.referencingValues() {
+		if ref, ok, err := parseReference(item.value); err == nil && ok {
+			kinds[ref.Kind] = true
+		}
+	}
+	return kinds
+}
+
+// referencingValue is one field that may hold a reference, with the key
+// and provider of the spec it belongs to.
+type referencingValue struct {
+	key      string
+	provider string
+	value    string
+}
+
+// referencingValues lists every field in the bundle that may hold a
+// reference.
+func (b Bundle) referencingValues() []referencingValue {
+	var items []referencingValue
+	for _, record := range b.Dns {
+		for _, value := range record.Values {
+			items = append(items, referencingValue{key: record.Key(), provider: record.Provider, value: value})
+		}
+	}
+	for _, check := range b.HealthChecks {
+		items = append(items, referencingValue{key: "healthCheck|" + check.Name, provider: check.Provider, value: check.Target})
+	}
+	return items
+}
+
+// pendingSummary renders the plan summary for a record awaiting references.
+func pendingSummary(pending []Reference) string {
+	parts := make([]string, 0, len(pending))
+	for _, ref := range pending {
+		parts = append(parts, ref.String())
+	}
+	return "awaits " + strings.Join(parts, ", ")
+}
+
+// providerOf returns the provider of the spec of kind named name, when the
+// bundle holds one.
+func (b Bundle) providerOf(kind, name string) (string, bool) {
+	switch kind {
+	case "staticAddress":
+		for _, item := range b.Addresses {
+			if item.Name == name {
+				return item.Provider, true
+			}
+		}
+	case "instance":
+		for _, item := range b.Instances {
+			if item.Name == name {
+				return item.Provider, true
+			}
+		}
+	}
+	return "", false
+}
+
+// BudgetAlert emails the listed addresses when actual or, with Forecast,
+// forecasted spend passes Threshold percent of the budget.
+type BudgetAlert struct {
+	Threshold int64
+	Forecast  bool
+	Emails    []string
+}
+
+// Budget is a monthly cost budget with alerts. Amount is a decimal string.
+type Budget struct {
+	Provider string
+	Name     string
+	Amount   string
+	Currency string
+	Alerts   []BudgetAlert
+}
+
+// HealthCheck probes Target from outside the account and emails on failure.
+// Target is an address, a hostname, or a reference. ID is the live check
+// id, empty in a spec. Alarm reports whether the live alarm exists; a spec
+// always wants it.
+type HealthCheck struct {
+	Provider         string
+	ID               string
+	Name             string
+	Target           string
+	Protocol         string
+	Port             int64
+	Path             string
+	Host             string
+	Interval         int64
+	FailureThreshold int64
+	Emails           []string
+	Alarm            bool
+}
+
+// key renders an alert for set comparison, emails sorted.
+func (a BudgetAlert) key() string {
+	kind := "actual"
+	if a.Forecast {
+		kind = "forecast"
+	}
+	return fmt.Sprintf("%s|%d|%s", kind, a.Threshold, strings.Join(normalized(a.Emails), ","))
+}
+
+func alertKeys(alerts []BudgetAlert) []string {
+	keys := make([]string, 0, len(alerts))
+	for _, a := range alerts {
+		keys = append(keys, a.key())
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// sameAmount compares two decimal amounts numerically, so "15", "15.0",
+// and "15.00" are equal.
+func sameAmount(a, b string) bool {
+	return normalizeAmount(a) == normalizeAmount(b)
+}
+
+func normalizeAmount(amount string) string {
+	whole, fraction, _ := strings.Cut(strings.TrimSpace(amount), ".")
+	fraction = strings.TrimRight(fraction, "0")
+	whole = strings.TrimLeft(whole, "0")
+	if whole == "" {
+		whole = "0"
+	}
+	if fraction == "" {
+		return whole
+	}
+	return whole + "." + fraction
+}
+
+// isDecimalAmount reports whether amount is digits with up to two decimals.
+func isDecimalAmount(amount string) bool {
+	whole, fraction, dotted := strings.Cut(amount, ".")
+	if whole == "" || (dotted && (fraction == "" || len(fraction) > 2)) {
+		return false
+	}
+	for _, c := range whole + fraction {
+		if c < '0' || c > '9' {
 			return false
 		}
 	}

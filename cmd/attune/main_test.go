@@ -677,7 +677,7 @@ func TestAwsExampleValidatesOffline(t *testing.T) {
 	h.mustRun("init", "-N")
 	h.mustRun("add", "attune.yaml", filepath.Join(root, "attune.yaml"))
 	h.mustRun("add", filepath.Join(root, "specs"))
-	want := "attune validate: OK (6 specs) content=v0.1.0\n"
+	want := "attune validate: OK (8 specs) content=v0.1.0\n"
 	if out := h.mustRun("validate"); out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
@@ -694,7 +694,8 @@ func TestAwsExampleHasOneOfEveryHostKind(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	counts := map[string]int{"dns": len(bundle.Dns), "iamRoles": len(bundle.IamRoles), "buckets": len(bundle.Buckets),
-		"firewalls": len(bundle.Firewalls), "instances": len(bundle.Instances), "addresses": len(bundle.Addresses)}
+		"firewalls": len(bundle.Firewalls), "instances": len(bundle.Instances), "addresses": len(bundle.Addresses),
+		"budgets": len(bundle.Budgets), "healthChecks": len(bundle.HealthChecks)}
 	for name, count := range counts {
 		if count != 1 {
 			t.Errorf("%s count = %d, want 1", name, count)
@@ -720,5 +721,20 @@ func TestPruneHostsFlagParsesAndDefaultsOff(t *testing.T) {
 	overrides, err := parseFlags([]string{"-H=false"})
 	if err != nil || overrides.PruneHosts == nil || *overrides.PruneHosts {
 		t.Errorf("-H=false: %+v, %v", overrides, err)
+	}
+}
+
+// TestPruneMonitoringFlagParses — AT6: -M and --prune-monitoring parse and
+// the help shows the flag off by default.
+func TestPruneMonitoringFlagParses(t *testing.T) {
+	for _, args := range [][]string{{"-M"}, {"--prune-monitoring"}} {
+		overrides, err := parseFlags(args)
+		if err != nil || overrides.PruneMonitoring == nil || !*overrides.PruneMonitoring || !Resolve(nil, overrides).PruneMonitoring {
+			t.Errorf("%v: %+v %v", args, overrides, err)
+		}
+	}
+	_, out, _ := captureRun(t, []string{"-h"})
+	if !strings.Contains(out, "-M, --prune-monitoring[=BOOL]") || !strings.Contains(out, "Delete unmanaged budgets and health checks; off by default") {
+		t.Errorf("help lacks the -M row")
 	}
 }

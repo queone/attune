@@ -142,7 +142,7 @@ func TestAwsCreatesZoneThenUpsertsRecords(t *testing.T) {
 	if strings.Join(keys, ";") != strings.Join(want, ";") {
 		t.Fatalf("changes = %v, want %v", keys, want)
 	}
-	if err := Apply(provider, changes, "", nil); err != nil {
+	if err := Apply(provider, changes, &Options{}, nil); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	pairs := cli.pairs()
@@ -231,7 +231,7 @@ func TestAwsPlansAgainstRecordedZone(t *testing.T) {
 	if err != nil || len(changes) != 1 || changes[0].Action != ActionDelete || changes[0].Key != "example.com|A|*" {
 		t.Fatalf("unmanaged record: changes=%v err=%v", changes, err)
 	}
-	if err := Apply(provider, changes, "", nil); err != nil {
+	if err := Apply(provider, changes, &Options{}, nil); err != nil {
 		t.Fatalf("Apply delete: %v", err)
 	}
 	batch := cli.argAfter(cli.calls[len(cli.calls)-1], "--change-batch")
@@ -399,7 +399,7 @@ func TestAwsCreatesHostInDependencyOrder(t *testing.T) {
 		t.Errorf("instance image = %q, want the resolved id", changes[3].Target.Instance.Image)
 	}
 	var applied []string
-	if err := Apply(provider, changes, "", func(c Change) { applied = append(applied, c.Key+" "+c.Summary) }); err != nil {
+	if err := Apply(provider, changes, &Options{}, func(c Change) { applied = append(applied, c.Key+" "+c.Summary) }); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	wantPairs := []string{
@@ -468,7 +468,7 @@ func TestAwsReplaceIsPlannedAndRefused(t *testing.T) {
 		t.Fatalf("changes = %v summary=%q", got, changes[0].Summary)
 	}
 	before := len(cli.calls)
-	err = Apply(provider, changes, "", nil)
+	err = Apply(provider, changes, &Options{}, nil)
 	want := "replace instance instance|example-host: image is immutable; remove the spec, apply, then add it back"
 	if err == nil || err.Error() != want {
 		t.Errorf("Apply = %v, want %q", err, want)
@@ -516,7 +516,7 @@ func TestAwsPrunesHostsInReverseOrder(t *testing.T) {
 		t.Fatalf("deletes = %v\nwant %s", got, want)
 	}
 	before := len(cli.calls)
-	if err := Apply(provider, deletes, "", nil); err != nil {
+	if err := Apply(provider, deletes, &Options{}, nil); err != nil {
 		t.Fatalf("Apply deletes: %v", err)
 	}
 	var mutations []string
@@ -541,7 +541,409 @@ func TestAwsHostAllowlistStillRefusesOthers(t *testing.T) {
 		t.Errorf("unlisted command: err=%v calls=%v", err, cli.calls)
 	}
 	spec, _ := LookupProvider("aws")
-	if !slices.Equal(spec.Kinds, []string{"dnsRecordSet", "iamRole", "bucket", "firewall", "instance", "staticAddress"}) {
+	if !slices.Equal(spec.Kinds, []string{"dnsRecordSet", "iamRole", "bucket", "firewall", "instance", "staticAddress", "budget", "healthCheck"}) {
 		t.Errorf("aws kinds = %v", spec.Kinds)
+	}
+}
+
+// ---- References
+
+const awsReference = "${staticAddress:example-host:publicIp}"
+
+func awsZoneRecordsJSON(ip string) string {
+	return `{"ResourceRecordSets":[
+		{"Name":"example.com.","Type":"NS","TTL":172800,"ResourceRecords":[{"Value":"ns-1.awsdns-00.com."}]},
+		{"Name":"example.com.","Type":"SOA","TTL":900,"ResourceRecords":[{"Value":"ns-1.awsdns-00.com. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"}]},
+		{"Name":"docs.example.com.","Type":"A","TTL":300,"ResourceRecords":[{"Value":"` + ip + `"}]}]}`
+}
+
+func awsReferenceBundle() *Bundle {
+	bundle := awsHostBundle()
+	bundle.Dns = []DnsRecord{{Provider: "aws", Zone: "example.com", RecordType: "A", Name: "docs", TTL: 300, Values: []string{awsReference}}}
+	return bundle
+}
+
+func awsFullAccountWithZone(ip string) map[string][]fakeAwsResult {
+	recorded := awsFullAccount(awsSecurityGroupJSON, awsInstanceJSON("ami-0example", "example"))
+	recorded["route53 list-hosted-zones-by-name"] = []fakeAwsResult{{out: awsZoneListJSON}}
+	recorded["route53 list-resource-record-sets"] = []fakeAwsResult{{out: awsZoneRecordsJSON(ip)}}
+	recorded["route53 change-resource-record-sets"] = []fakeAwsResult{{out: `{}`}}
+	return recorded
+}
+
+// TestAwsReferenceResolvesAfterTheAddressIsCreated — AT2: on an empty
+// account the record plans as awaiting the address and apply sends the
+// allocated address in the record batch.
+func TestAwsReferenceResolvesAfterTheAddressIsCreated(t *testing.T) {
+	provider, cli := newAwsFake(map[string][]fakeAwsResult{
+		"resourcegroupstaggingapi get-resources": {{out: awsEmptyTaggingJSON}},
+		"ssm get-parameter":                      {{out: `{"Parameter":{"Value":"ami-0example"}}`}},
+		"route53 list-hosted-zones-by-name":      {{out: awsZoneListJSON}},
+		"route53 list-resource-record-sets":      {{out: `{"ResourceRecordSets":[]}`}},
+		"route53 change-resource-record-sets":    {{out: `{}`}},
+		"iam create-role":                        {{out: `{}`}},
+		"iam attach-role-policy":                 {{out: ``}},
+		"iam put-role-policy":                    {{out: ``}},
+		"iam create-instance-profile":            {{out: `{}`}},
+		"iam add-role-to-instance-profile":       {{out: ``}},
+		"s3api create-bucket":                    {{out: `{}`}},
+		"s3api put-bucket-tagging":               {{out: ``}},
+		"s3api put-public-access-block":          {{out: ``}},
+		"s3api put-bucket-encryption":            {{out: ``}},
+		"ec2 describe-vpcs":                      {{out: `{"Vpcs":[{"VpcId":"vpc-0default","IsDefault":true}]}`}},
+		"ec2 create-security-group":              {{out: `{"GroupId":"sg-0new"}`}},
+		"ec2 authorize-security-group-ingress":   {{out: `{}`}},
+		"ec2 describe-images":                    {{out: `{"Images":[{"RootDeviceName":"/dev/xvda"}]}`}},
+		"ec2 run-instances":                      {{out: `{"Instances":[{"InstanceId":"i-0new"}]}`}},
+		"ec2 allocate-address":                   {{out: `{"AllocationId":"eipalloc-0new","PublicIp":"203.0.113.10"}`}},
+		"ec2 associate-address":                  {{out: `{}`}},
+	})
+	options := &Options{Provider: "aws", PruneDNS: true}
+	changes, err := Plan(provider, awsReferenceBundle(), options)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	keys := changeKeys(changes)
+	if len(keys) != 6 || keys[4] != "create staticAddress|example-host" || keys[5] != "create example.com|A|docs" {
+		t.Fatalf("changes = %v", keys)
+	}
+	if changes[5].Summary != "awaits "+awsReference {
+		t.Errorf("record summary = %q", changes[5].Summary)
+	}
+	if err := Apply(provider, changes, options, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	last := cli.calls[len(cli.calls)-1]
+	if last[1] != "change-resource-record-sets" || !strings.Contains(cli.argAfter(last, "--change-batch"), `"Value":"203.0.113.10"`) {
+		t.Errorf("last call = %v, want the record batch carrying the allocated address", last)
+	}
+	if id := options.Outputs.values["${instance:example-host:id}"]; id != "i-0new" {
+		t.Errorf("instance output = %q, want the launched id", id)
+	}
+}
+
+// TestAwsReferenceResolvesFromLiveState — AT3 and AT4: a live record that
+// already holds the live address plans no change, a stale one plans one
+// update whose diff shows the resolved address, and -k dnsRecordSet still
+// reads the address to resolve the reference.
+func TestAwsReferenceResolvesFromLiveState(t *testing.T) {
+	provider, _ := newAwsFake(awsFullAccountWithZone("203.0.113.10"))
+	changes, err := Plan(provider, awsReferenceBundle(), &Options{Provider: "aws", PruneDNS: true})
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("matching: changes=%v err=%v", changeKeys(changes), err)
+	}
+	provider, _ = newAwsFake(awsFullAccountWithZone("203.0.113.99"))
+	changes, err = Plan(provider, awsReferenceBundle(), &Options{Provider: "aws", PruneDNS: true})
+	if err != nil || len(changes) != 1 || changes[0].Action != ActionUpdate {
+		t.Fatalf("stale: changes=%v err=%v", changeKeys(changes), err)
+	}
+	if d := changes[0].Diffs; len(d) != 1 || d[0].Field != "values" || d[0].Old != "203.0.113.99" || d[0].New != "203.0.113.10" {
+		t.Errorf("diffs = %+v", d)
+	}
+	if changes[0].Target.Dns.Values[0] != "203.0.113.10" {
+		t.Errorf("target value = %q, want resolved", changes[0].Target.Dns.Values[0])
+	}
+	provider, cli := newAwsFake(awsFullAccountWithZone("203.0.113.10"))
+	changes, err = Plan(provider, awsReferenceBundle(), &Options{Provider: "aws", PruneDNS: true, Kind: "dnsRecordSet"})
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("-k dnsRecordSet: changes=%v err=%v", changeKeys(changes), err)
+	}
+	if !slices.Contains(cli.pairs(), "ec2 describe-addresses") {
+		t.Errorf("calls = %v, want the address read despite the kind filter", cli.pairs())
+	}
+}
+
+// TestAwsUnresolvedReferenceFailsBeforeDNS — AT5: a record whose reference
+// has no output fails apply before any DNS call.
+func TestAwsUnresolvedReferenceFailsBeforeDNS(t *testing.T) {
+	provider, cli := newAwsFake(map[string][]fakeAwsResult{"route53 list-hosted-zones-by-name": {{out: awsZoneListJSON}}})
+	record := DnsRecord{Provider: "aws", Zone: "example.com", RecordType: "A", Name: "docs", TTL: 300, Values: []string{awsReference}}
+	err := Apply(provider, []Change{{Kind: "dnsRecordSet", Action: ActionCreate, Key: record.Key(), Target: Target{Kind: TargetDns, Dns: record}}}, &Options{Provider: "aws"}, nil)
+	want := "reference " + awsReference + " is not resolved; apply its target first"
+	if err == nil || err.Error() != want {
+		t.Errorf("Apply = %v, want %q", err, want)
+	}
+	if len(cli.calls) != 0 {
+		t.Errorf("DNS calls made before the refusal: %v", cli.pairs())
+	}
+}
+
+// ---- Monitoring
+
+func awsMonitoringBundle() *Bundle {
+	bundle := awsReferenceBundle()
+	bundle.Budgets = []Budget{{Provider: "aws", Name: "example-monthly", Amount: "15.00", Currency: "USD", Alerts: []BudgetAlert{
+		{Threshold: 80, Emails: []string{"ops@example.com"}},
+		{Threshold: 100, Forecast: true, Emails: []string{"ops@example.com"}},
+	}}}
+	bundle.HealthChecks = []HealthCheck{{Provider: "aws", Name: "example-site", Target: awsReference, Protocol: "HTTPS", Port: 443, Path: "/", Host: "example.com",
+		Interval: 30, FailureThreshold: 3, Emails: []string{"ops@example.com"}, Alarm: true}}
+	return bundle
+}
+
+const (
+	awsTopicARN          = "arn:aws:sns:us-east-1:111111111111:attune-example-site"
+	awsMonitoringTagging = `{"ResourceTagMappingList":[
+		{"ResourceARN":"arn:aws:iam::111111111111:role/attune/example-host"},
+		{"ResourceARN":"arn:aws:s3:::example-attune-backups"},
+		{"ResourceARN":"arn:aws:ec2:us-east-1:111111111111:security-group/sg-0live"},
+		{"ResourceARN":"arn:aws:ec2:us-east-1:111111111111:instance/i-0live"},
+		{"ResourceARN":"arn:aws:ec2:us-east-1:111111111111:elastic-ip/eipalloc-0live"},
+		{"ResourceARN":"arn:aws:route53:::healthcheck/hc-live"}]}`
+	awsBudgetNotifications = `{"Notifications":[{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":80.0,"ThresholdType":"PERCENTAGE"},{"NotificationType":"FORECASTED","ComparisonOperator":"GREATER_THAN","Threshold":100.0,"ThresholdType":"PERCENTAGE"}]}`
+)
+
+func awsHealthCheckJSON(protocol string, threshold int) string {
+	return `{"HealthCheck":{"Id":"hc-live","HealthCheckConfig":{"IPAddress":"203.0.113.10","Port":443,"Type":"` + protocol + `","ResourcePath":"/","FullyQualifiedDomainName":"example.com","RequestInterval":30,"FailureThreshold":` + string(rune('0'+threshold)) + `}}}`
+}
+
+func awsFullAccountWithMonitoring(notifications, healthCheck string) map[string][]fakeAwsResult {
+	recorded := awsFullAccountWithZone("203.0.113.10")
+	recorded["resourcegroupstaggingapi get-resources"] = []fakeAwsResult{{out: awsMonitoringTagging}}
+	recorded["sts get-caller-identity"] = []fakeAwsResult{{out: awsIdentityJSON}}
+	recorded["budgets describe-budgets"] = []fakeAwsResult{{out: `{"Budgets":[{"BudgetName":"example-monthly","BudgetLimit":{"Amount":"15.0","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}]}`}}
+	recorded["budgets list-tags-for-resource"] = []fakeAwsResult{{out: `{"ResourceTags":[{"Key":"attune","Value":"managed"}]}`}}
+	recorded["budgets describe-notifications-for-budget"] = []fakeAwsResult{{out: notifications}}
+	recorded["budgets describe-subscribers-for-notification"] = []fakeAwsResult{{out: `{"Subscribers":[{"SubscriptionType":"EMAIL","Address":"ops@example.com"}]}`}}
+	recorded["route53 get-health-check"] = []fakeAwsResult{{out: healthCheck}}
+	recorded["route53 list-tags-for-resource"] = []fakeAwsResult{{out: `{"ResourceTagSet":{"Tags":[{"Key":"attune","Value":"managed"},{"Key":"Name","Value":"example-site"}]}}`}}
+	recorded["sns list-topics"] = []fakeAwsResult{{out: `{"Topics":[{"TopicArn":"` + awsTopicARN + `"}]}`}}
+	recorded["sns list-subscriptions-by-topic"] = []fakeAwsResult{{out: `{"Subscriptions":[{"Endpoint":"ops@example.com","Protocol":"email","SubscriptionArn":"` + awsTopicARN + `:1"}]}`}}
+	recorded["cloudwatch describe-alarms"] = []fakeAwsResult{{out: `{"MetricAlarms":[{"AlarmName":"attune-example-site"}]}`}}
+	for _, pair := range []string{"budgets delete-notification", "budgets create-notification", "budgets delete-budget", "budgets update-budget",
+		"route53 update-health-check", "route53 delete-health-check", "sns create-topic", "sns delete-topic", "cloudwatch put-metric-alarm", "cloudwatch delete-alarms"} {
+		out := `{}`
+		if pair == "sns create-topic" {
+			out = `{"TopicArn":"` + awsTopicARN + `"}`
+		}
+		recorded[pair] = []fakeAwsResult{{out: out}}
+	}
+	return recorded
+}
+
+func grounded(t *testing.T, provider *AwsProvider) {
+	t.Helper()
+	if _, err := provider.Ground(); err != nil {
+		t.Fatalf("Ground: %v", err)
+	}
+}
+
+// TestAwsCreatesBudgetAndHealthCheck — AT2: an empty account plans the
+// budget first and the check after the address awaiting its reference, and
+// apply creates the budget with its alerts and tag, then the check on the
+// allocated address with its topic, subscription, and alarm in us-east-1.
+func TestAwsCreatesBudgetAndHealthCheck(t *testing.T) {
+	recorded := map[string][]fakeAwsResult{
+		"sts get-caller-identity":                {{out: awsIdentityJSON}},
+		"resourcegroupstaggingapi get-resources": {{out: awsEmptyTaggingJSON}},
+		"budgets describe-budgets":               {{out: `{"Budgets":[]}`}},
+		"budgets create-budget":                  {{out: ``}},
+		"ssm get-parameter":                      {{out: `{"Parameter":{"Value":"ami-0example"}}`}},
+		"route53 list-hosted-zones-by-name":      {{out: awsZoneListJSON}},
+		"route53 list-resource-record-sets":      {{out: `{"ResourceRecordSets":[]}`}},
+		"route53 change-resource-record-sets":    {{out: `{}`}},
+		"route53 create-health-check":            {{out: `{"HealthCheck":{"Id":"hc-new"}}`}},
+		"route53 change-tags-for-resource":       {{out: ``}},
+		"sns create-topic":                       {{out: `{"TopicArn":"` + awsTopicARN + `"}`}},
+		"sns list-subscriptions-by-topic":        {{out: `{"Subscriptions":[]}`}},
+		"sns subscribe":                          {{out: `{"SubscriptionArn":"pending confirmation"}`}},
+		"cloudwatch put-metric-alarm":            {{out: ``}},
+		"iam create-role":                        {{out: `{}`}},
+		"iam attach-role-policy":                 {{out: ``}},
+		"iam put-role-policy":                    {{out: ``}},
+		"iam create-instance-profile":            {{out: `{}`}},
+		"iam add-role-to-instance-profile":       {{out: ``}},
+		"s3api create-bucket":                    {{out: `{}`}},
+		"s3api put-bucket-tagging":               {{out: ``}},
+		"s3api put-public-access-block":          {{out: ``}},
+		"s3api put-bucket-encryption":            {{out: ``}},
+		"ec2 describe-vpcs":                      {{out: `{"Vpcs":[{"VpcId":"vpc-0default","IsDefault":true}]}`}},
+		"ec2 create-security-group":              {{out: `{"GroupId":"sg-0new"}`}},
+		"ec2 authorize-security-group-ingress":   {{out: `{}`}},
+		"ec2 describe-images":                    {{out: `{"Images":[{"RootDeviceName":"/dev/xvda"}]}`}},
+		"ec2 run-instances":                      {{out: `{"Instances":[{"InstanceId":"i-0new"}]}`}},
+		"ec2 allocate-address":                   {{out: `{"AllocationId":"eipalloc-0new","PublicIp":"203.0.113.10"}`}},
+		"ec2 associate-address":                  {{out: `{}`}},
+	}
+	provider, cli := newAwsFake(recorded)
+	provider.region = "eu-west-1"
+	grounded(t, provider)
+	options := &Options{Provider: "aws", PruneDNS: true}
+	changes, err := Plan(provider, awsMonitoringBundle(), options)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	keys := changeKeys(changes)
+	want := []string{"create budget|example-monthly", "create iamRole|example-host", "create bucket|example-attune-backups", "create firewall|example-host",
+		"create instance|example-host", "create staticAddress|example-host", "create healthCheck|example-site", "create example.com|A|docs"}
+	if strings.Join(keys, ";") != strings.Join(want, ";") {
+		t.Fatalf("changes = %v\nwant %v", keys, want)
+	}
+	if changes[6].Summary != "awaits "+awsReference {
+		t.Errorf("health check summary = %q", changes[6].Summary)
+	}
+	if err := Apply(provider, changes, options, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	var budgetCall, checkCall, alarmCall, subscribeCalls []string
+	subscribeCount := 0
+	for _, call := range cli.calls {
+		switch call[0] + " " + call[1] {
+		case "budgets create-budget":
+			budgetCall = call
+		case "route53 create-health-check":
+			checkCall = call
+		case "cloudwatch put-metric-alarm":
+			alarmCall = call
+		case "sns subscribe":
+			subscribeCount++
+			subscribeCalls = call
+		}
+	}
+	joined := strings.Join(budgetCall, " ")
+	for _, want := range []string{`"Amount":"15.00"`, `"NotificationType":"ACTUAL"`, `"NotificationType":"FORECASTED"`, `"Threshold":80`, `"Key":"attune"`, "--account-id 111111111111"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("create-budget argv lacks %q: %v", want, budgetCall)
+		}
+	}
+	config := cli.argAfter(checkCall, "--health-check-config")
+	for _, want := range []string{`"IPAddress":"203.0.113.10"`, `"Port":443`, `"Type":"HTTPS"`, `"FullyQualifiedDomainName":"example.com"`} {
+		if !strings.Contains(config, want) {
+			t.Errorf("health check config lacks %q: %s", want, config)
+		}
+	}
+	if subscribeCount != 1 || cli.argAfter(subscribeCalls, "--notification-endpoint") != "ops@example.com" {
+		t.Errorf("subscribe calls = %d %v", subscribeCount, subscribeCalls)
+	}
+	if cli.argAfter(alarmCall, "--region") != "us-east-1" || cli.argAfter(alarmCall, "--metric-name") != "HealthCheckStatus" ||
+		cli.argAfter(alarmCall, "--alarm-actions") != awsTopicARN || cli.argAfter(alarmCall, "--ok-actions") != awsTopicARN || !strings.Contains(cli.argAfter(alarmCall, "--dimensions"), "hc-new") {
+		t.Errorf("put-metric-alarm argv = %v", alarmCall)
+	}
+	if cli.argAfter(checkCall, "--region") != "eu-west-1" {
+		t.Errorf("create-health-check region = %q, want the configured eu-west-1", cli.argAfter(checkCall, "--region"))
+	}
+	order := cli.pairs()
+	if slices.Index(order, "route53 create-health-check") < slices.Index(order, "ec2 associate-address") || slices.Index(order, "budgets create-budget") > slices.Index(order, "iam create-role") {
+		t.Errorf("call order = %v", order)
+	}
+}
+
+// TestAwsPlansMonitoringAgainstRecordedAccount — AT3: a matching account
+// plans nothing; a changed alert threshold and failure threshold plan two
+// updates with diffs naming them, and apply swaps the notification and
+// updates the check.
+func TestAwsPlansMonitoringAgainstRecordedAccount(t *testing.T) {
+	provider, _ := newAwsFake(awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTPS", 3)))
+	grounded(t, provider)
+	changes, err := Plan(provider, awsMonitoringBundle(), &Options{Provider: "aws", PruneDNS: true, PruneMonitoring: true})
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("matching: changes=%v err=%v", changeKeys(changes), err)
+	}
+	drifted := strings.Replace(awsBudgetNotifications, `"Threshold":80.0`, `"Threshold":70.0`, 1)
+	provider, cli := newAwsFake(awsFullAccountWithMonitoring(drifted, awsHealthCheckJSON("HTTPS", 2)))
+	grounded(t, provider)
+	options := &Options{Provider: "aws", PruneDNS: true}
+	changes, err = Plan(provider, awsMonitoringBundle(), options)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if got := changeKeys(changes); strings.Join(got, ";") != "update budget|example-monthly;update healthCheck|example-site" {
+		t.Fatalf("changes = %v", got)
+	}
+	if d := changes[0].Diffs; len(d) != 2 || d[0].Field != "alert added" || !strings.HasPrefix(d[0].New, "actual|80|") || d[1].Field != "alert removed" {
+		t.Errorf("budget diffs = %+v", d)
+	}
+	if d := changes[1].Diffs; len(d) != 1 || d[0].Field != "failureThreshold" || d[0].Old != "2" || d[0].New != "3" {
+		t.Errorf("health check diffs = %+v", d)
+	}
+	before := len(cli.calls)
+	if err := Apply(provider, changes, options, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	var mutations []string
+	for _, call := range cli.calls[before:] {
+		if !strings.HasPrefix(call[1], "describe") && !strings.HasPrefix(call[1], "list") {
+			mutations = append(mutations, call[0]+" "+call[1])
+		}
+	}
+	for _, want := range []string{"budgets delete-notification", "budgets create-notification", "route53 update-health-check", "cloudwatch put-metric-alarm"} {
+		if !slices.Contains(mutations, want) {
+			t.Errorf("mutations %v lack %s", mutations, want)
+		}
+	}
+	if slices.Contains(mutations, "budgets update-budget") || slices.Contains(mutations, "sns subscribe") {
+		t.Errorf("unneeded mutations: %v", mutations)
+	}
+}
+
+// TestAwsHealthCheckProtocolChangeIsReplace — AT4: a live check on another
+// protocol plans a replace and apply refuses it.
+func TestAwsHealthCheckProtocolChangeIsReplace(t *testing.T) {
+	provider, cli := newAwsFake(awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTP", 3)))
+	grounded(t, provider)
+	options := &Options{Provider: "aws", PruneDNS: true}
+	changes, err := Plan(provider, awsMonitoringBundle(), options)
+	if err != nil || len(changes) != 1 || changes[0].Action != ActionReplace || changes[0].Summary != "protocol is immutable" {
+		t.Fatalf("changes=%v err=%v", changeKeys(changes), err)
+	}
+	before := len(cli.calls)
+	if err := Apply(provider, changes, options, nil); err == nil || !strings.HasPrefix(err.Error(), "replace healthCheck healthCheck|example-site: protocol is immutable") {
+		t.Errorf("Apply = %v", err)
+	}
+	if len(cli.calls) != before {
+		t.Error("Apply ran CLI calls after refusing")
+	}
+}
+
+// TestAwsPrunesMonitoringOnlyWhenAsked — AT5: unmanaged live monitoring is
+// left alone by default and, with -M, deleted check first then budget, the
+// alarm and topic going before the check.
+func TestAwsPrunesMonitoringOnlyWhenAsked(t *testing.T) {
+	other := awsMonitoringBundle()
+	other.Budgets[0].Name = "other-monthly"
+	other.HealthChecks[0].Name = "other-site"
+	provider, _ := newAwsFake(awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTPS", 3)))
+	grounded(t, provider)
+	changes, err := Plan(provider, other, &Options{Provider: "aws", PruneDNS: true})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	for _, c := range changes {
+		if c.Action == ActionDelete {
+			t.Fatalf("delete planned without monitoring pruning: %v", changeKeys(changes))
+		}
+	}
+	provider, cli := newAwsFake(awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTPS", 3)))
+	grounded(t, provider)
+	options := &Options{Provider: "aws", PruneDNS: true, PruneMonitoring: true}
+	changes, err = Plan(provider, other, options)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	var deletes []Change
+	for _, c := range changes {
+		if c.Action == ActionDelete {
+			deletes = append(deletes, c)
+		}
+	}
+	if got := changeKeys(deletes); strings.Join(got, ";") != "delete healthCheck|example-site;delete budget|example-monthly" {
+		t.Fatalf("deletes = %v", got)
+	}
+	before := len(cli.calls)
+	if err := Apply(provider, deletes, options, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	var mutations []string
+	for _, call := range cli.calls[before:] {
+		if !strings.HasPrefix(call[1], "describe") && !strings.HasPrefix(call[1], "list") {
+			mutations = append(mutations, call[0]+" "+call[1])
+			if call[0] == "cloudwatch" && cli.argAfter(call, "--region") != "us-east-1" {
+				t.Errorf("%s ran outside us-east-1: %v", call[1], call)
+			}
+		}
+	}
+	want := "cloudwatch delete-alarms;sns delete-topic;route53 delete-health-check;budgets delete-budget"
+	if strings.Join(mutations, ";") != want {
+		t.Errorf("mutations = %v\nwant %s", mutations, want)
 	}
 }

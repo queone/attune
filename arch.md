@@ -17,7 +17,7 @@ attune reads specs and `attune.yaml` from its encrypted store and validates them
 - `cmd/attune/main.go`: help, flags, and the validate, plan, and apply flow
 - `spec.go`, `config.go`, `model.go`: spec parsing, configuration precedence, and the resource model
 - `reconcile.go`: change planning per resource type
-- `provider.go`: the provider registry and the capability interfaces (`DNSProvider`, `IdentityProvider`, `RoleProvider`, `ResourceGroupProvider`, `IamRoleProvider`, `StorageProvider`, `NetworkProvider`, `ComputeProvider`) a provider implements
+- `provider.go`: the provider registry and the capability interfaces (`DNSProvider`, `IdentityProvider`, `RoleProvider`, `ResourceGroupProvider`, `IamRoleProvider`, `StorageProvider`, `NetworkProvider`, `ComputeProvider`, `MonitoringProvider`) a provider implements
 - `azure.go`: the ARM and Graph provider
 - `aws.go`: the Route 53 and host provider over the `aws` CLI
 - `store.go`, `key.go`, `edit.go`, `render.go`: the store, its key, `edit`, and `render` and `cat`
@@ -52,9 +52,11 @@ Integrated audit adoption is the only command-mediated phase exception. It can a
 - The Azure provider restricts requests to an ARM and Graph origin allowlist, and non-2xx response bodies are redacted wholesale before any diagnostic or error message.
 - Role-assignment and role-definition IDs are derived deterministically (SHA1-based UUIDv5), to stay stable across repeated `apply` runs and compatible with resources that rkit's attune created.
 - The store is lockbox's sealed SQLite file with its own key under the `attune` Keychain service. Its file starts with the `MACFIT` format tag, which must not change.
-- DNS pruning defaults on. Identity, role, resource-group, and host pruning default off.
+- DNS pruning defaults on. Identity, role, resource-group, host, and monitoring pruning default off.
 - Host kinds plan in dependency order (`iamRole`, `bucket`, `firewall`, `instance`, `staticAddress`, then DNS) and prune in reverse. An immutable-field change plans as `! replace` and apply refuses it.
 - The AWS provider tags everything it creates `attune=managed` and lists only tagged resources, so prune is bounded to attune's own resources.
+- The `aws` provider's monitoring kinds compose services: a `healthCheck` is a Route 53 health check, an SNS topic named `attune-<name>`, and a CloudWatch alarm in `us-east-1`; a `budget` is an AWS Budgets cost budget with email notifications. Both are tagged and tag-discovered like the host kinds and prune only under `prune.monitoring`.
+- A record value may reference another spec's live output (`${kind:name:field}`). The reconciler owns the mechanism: `validate` checks references offline, `Plan` resolves them from live state, and `Apply` records each applied output and fills pending references before the record is sent. References stay within one provider.
 - lockbox comes from `github.com/queone/gkit` at a pinned version. Raise that version deliberately.
 
 ## Conventions

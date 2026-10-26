@@ -199,3 +199,75 @@ func TestHostKindsValidateShapes(t *testing.T) {
 		t.Errorf("instance under azure: %v", err)
 	}
 }
+
+// TestReferencesValidateOffline — AT1: a well-formed reference to a spec on
+// the same provider loads, and each malformed or dangling form fails with
+// an error naming the value and the problem.
+func TestReferencesValidateOffline(t *testing.T) {
+	address := specSource{name: "address.yaml", content: []byte("provider: aws\nkind: staticAddress\nname: example-host\ninstance: example-host\n")}
+	record := func(value string) specSource {
+		return specSource{name: "dns.yaml", content: []byte("provider: aws\nkind: dnsRecordSet\nzone: example.com\ntype: A\nname: docs\nttl: 300\nvalues:\n  - '" + value + "'\n")}
+	}
+	bundle, err := loadSources([]specSource{address, record("${staticAddress:example-host:publicIp}")}, "azure")
+	if err != nil || bundle.Dns[0].Values[0] != "${staticAddress:example-host:publicIp}" {
+		t.Fatalf("valid reference: %+v %v", bundle, err)
+	}
+	cases := map[string]string{
+		"${staticAddress:example-host}":   "not a reference of the form",
+		"${bucket:x:name}":                `kind "bucket" has no readable field`,
+		"${staticAddress:x:privateIp}":    `has no field "privateIp"`,
+		"${staticAddress:other:publicIp}": "names no staticAddress spec",
+		"v=spf1 ${x} -all":                "not a reference of the form",
+	}
+	for value, want := range cases {
+		_, err := loadSources([]specSource{address, record(value)}, "azure")
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "example.com|A|docs") {
+			t.Errorf("%s: err=%v, want it to contain %q and the record key", value, err, want)
+		}
+	}
+	registerDNSOnlyProvider(t)
+	other := specSource{name: "dns.yaml", content: []byte("provider: dnsonly\nkind: dnsRecordSet\nzone: example.com\ntype: A\nname: docs\nttl: 300\nvalues:\n  - '${staticAddress:example-host:publicIp}'\n")}
+	if _, err := loadSources([]specSource{address, other}, "azure"); err == nil || !strings.Contains(err.Error(), `target is on provider "aws", not "dnsonly"`) {
+		t.Errorf("cross-provider reference: %v", err)
+	}
+}
+
+// TestMonitoringKindsValidateShapes — AT1: budgets and health checks parse
+// with their defaults and reject the documented bad shapes.
+func TestMonitoringKindsValidateShapes(t *testing.T) {
+	load := func(doc string) (*Bundle, error) {
+		return loadSources([]specSource{{name: "spec.yaml", content: []byte(doc)}}, "azure")
+	}
+	bundle, err := load("provider: aws\nkind: budget\nname: b\namount: 15\nalerts:\n  - threshold: 80\n    emails: [ops@example.com]\n")
+	if err != nil || bundle.Budgets[0].Currency != "USD" || bundle.Budgets[0].Amount != "15" || bundle.Budgets[0].Alerts[0].Forecast {
+		t.Fatalf("budget defaults: %+v %v", bundle, err)
+	}
+	bundle, err = load("provider: aws\nkind: healthCheck\nname: h\ntarget: www.example.com\nprotocol: HTTPS\nport: 443\nemails: [ops@example.com]\n")
+	if err != nil {
+		t.Fatalf("health check: %v", err)
+	}
+	if c := bundle.HealthChecks[0]; c.Path != "/" || c.Interval != 30 || c.FailureThreshold != 3 || !c.Alarm {
+		t.Errorf("health check defaults = %+v", c)
+	}
+	for name, doc := range map[string]string{
+		"budget without alerts":    "provider: aws\nkind: budget\nname: b\namount: 15\n",
+		"budget non-decimal":       "provider: aws\nkind: budget\nname: b\namount: fifteen\nalerts:\n  - threshold: 80\n    emails: [a@example.com]\n",
+		"budget alert no emails":   "provider: aws\nkind: budget\nname: b\namount: 15\nalerts:\n  - threshold: 80\n    emails: []\n",
+		"check ICMP":               "provider: aws\nkind: healthCheck\nname: h\ntarget: 192.0.2.1\nprotocol: ICMP\nport: 1\nemails: [a@example.com]\n",
+		"check interval 20":        "provider: aws\nkind: healthCheck\nname: h\ntarget: 192.0.2.1\nprotocol: TCP\nport: 22\ninterval: 20\nemails: [a@example.com]\n",
+		"check threshold 11":       "provider: aws\nkind: healthCheck\nname: h\ntarget: 192.0.2.1\nprotocol: TCP\nport: 22\nfailureThreshold: 11\nemails: [a@example.com]\n",
+		"check no emails":          "provider: aws\nkind: healthCheck\nname: h\ntarget: 192.0.2.1\nprotocol: TCP\nport: 22\n",
+		"check TCP with path":      "provider: aws\nkind: healthCheck\nname: h\ntarget: 192.0.2.1\nprotocol: TCP\nport: 22\npath: /\nemails: [a@example.com]\n",
+		"check host with hostname": "provider: aws\nkind: healthCheck\nname: h\ntarget: www.example.com\nhost: example.com\nprotocol: HTTPS\nport: 443\nemails: [a@example.com]\n",
+		"check dangling reference": "provider: aws\nkind: healthCheck\nname: h\ntarget: ${staticAddress:nope:publicIp}\nprotocol: HTTPS\nport: 443\nemails: [a@example.com]\n",
+	} {
+		if _, err := load(doc); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	address := specSource{name: "address.yaml", content: []byte("provider: aws\nkind: staticAddress\nname: example-host\ninstance: example-host\n")}
+	check := specSource{name: "check.yaml", content: []byte("provider: aws\nkind: healthCheck\nname: h\ntarget: ${staticAddress:example-host:publicIp}\nhost: example.com\nprotocol: HTTPS\nport: 443\nemails: [a@example.com]\n")}
+	if _, err := loadSources([]specSource{address, check}, "azure"); err != nil {
+		t.Errorf("referenced target: %v", err)
+	}
+}

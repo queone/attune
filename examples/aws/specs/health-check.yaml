@@ -1,0 +1,14 @@
+# Synthetic uptime check of the example host's static address over HTTPS,
+# emailing on failure. The address confirms the subscription by email once.
+kind: healthCheck
+provider: aws
+name: example-site
+target: ${staticAddress:example-host:publicIp}
+host: example.com
+protocol: HTTPS
+port: 443
+path: /
+interval: 30
+failureThreshold: 3
+emails:
+  - ops@example.com

@@ -1,0 +1,15 @@
+# Synthetic monthly cost budget: an alert at 80 percent of actual spend and
+# one when the forecast passes the full amount.
+kind: budget
+provider: aws
+name: example-monthly
+amount: 15.00
+currency: USD
+alerts:
+  - threshold: 80
+    emails:
+      - ops@example.com
+  - threshold: 100
+    forecast: true
+    emails:
+      - ops@example.com

@@ -287,7 +287,40 @@ func loadSources(sources []specSource, defaultProvider string) (*Bundle, error) 
 		}
 		keys[provider+"|"+resourceKey] = true
 	}
+	if err := checkReferences(bundle); err != nil {
+		return nil, err
+	}
 	return bundle, nil
+}
+
+// checkReferences validates every reference in the bundle's record values
+// offline: its form, that the kind has that readable field, and that the
+// named spec exists under the same provider.
+func checkReferences(bundle *Bundle) error {
+	for _, item := range bundle.referencingValues() {
+		ref, ok, err := parseReference(item.value)
+		if err != nil {
+			return fmt.Errorf("%s %s: %w", item.key, "value", err)
+		}
+		if !ok {
+			continue
+		}
+		fields, known := referenceOutputs[ref.Kind]
+		if !known {
+			return fmt.Errorf("%s value %s: kind %q has no readable field", item.key, ref, ref.Kind)
+		}
+		if !slices.Contains(fields, ref.Field) {
+			return fmt.Errorf("%s value %s: %s has no field %q; readable: %s", item.key, ref, ref.Kind, ref.Field, strings.Join(fields, ", "))
+		}
+		targetProvider, found := bundle.providerOf(ref.Kind, ref.Name)
+		if !found {
+			return fmt.Errorf("%s value %s: names no %s spec", item.key, ref, ref.Kind)
+		}
+		if targetProvider != item.provider {
+			return fmt.Errorf("%s value %s: target is on provider %q, not %q; a reference must stay on one provider", item.key, ref, targetProvider, item.provider)
+		}
+	}
+	return nil
 }
 
 // loadSpecInto parses one spec of kind into bundle, tagging it with
@@ -640,6 +673,135 @@ func loadSpecInto(bundle *Bundle, kind, provider string, m map[string]any) (stri
 		bundle.Instances = append(bundle.Instances, item)
 		return "instance|" + item.Name, nil
 
+	case "budget":
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "amount", "currency", "alerts"}, ""); err != nil {
+			return "", err
+		}
+		name, err := requiredString(m, "name")
+		if err != nil {
+			return "", err
+		}
+		amount := fmt.Sprintf("%v", m["amount"])
+		if m["amount"] == nil || !isDecimalAmount(amount) {
+			return "", fmt.Errorf("budget amount must be a decimal such as 15 or 15.00, not %q", amount)
+		}
+		currency, err := optionalString(m, "currency")
+		if err != nil {
+			return "", err
+		}
+		if currency == "" {
+			currency = "USD"
+		}
+		rawAlerts, ok := m["alerts"].([]any)
+		if !ok || len(rawAlerts) == 0 {
+			return "", fmt.Errorf("budget alerts must be a list with at least one alert")
+		}
+		var alerts []BudgetAlert
+		for i, raw := range rawAlerts {
+			am, err := mapping(raw, fmt.Sprintf("alerts[%d]", i))
+			if err != nil {
+				return "", err
+			}
+			if err := rejectUnknown(am, []string{"threshold", "forecast", "emails"}, fmt.Sprintf("alerts[%d]", i)); err != nil {
+				return "", err
+			}
+			threshold, err := requiredI64(am, "threshold")
+			if err != nil {
+				return "", err
+			}
+			if threshold < 1 || threshold > 1000 {
+				return "", fmt.Errorf("budget alert threshold must be a percent from 1 to 1000, not %d", threshold)
+			}
+			forecast, err := optionalBool(am, "forecast")
+			if err != nil {
+				return "", err
+			}
+			emails, err := requiredStrings(am, "emails")
+			if err != nil {
+				return "", err
+			}
+			if len(emails) == 0 {
+				return "", fmt.Errorf("budget alert emails must not be empty")
+			}
+			alerts = append(alerts, BudgetAlert{Threshold: threshold, Forecast: forecast != nil && *forecast, Emails: emails})
+		}
+		item := Budget{Provider: provider, Name: name, Amount: amount, Currency: currency, Alerts: alerts}
+		bundle.Budgets = append(bundle.Budgets, item)
+		return "budget|" + item.Name, nil
+
+	case "healthCheck":
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "target", "protocol", "port", "path", "host", "interval", "failureThreshold", "emails"}, ""); err != nil {
+			return "", err
+		}
+		name, err := requiredString(m, "name")
+		if err != nil {
+			return "", err
+		}
+		target, err := requiredString(m, "target")
+		if err != nil {
+			return "", err
+		}
+		protocol, err := requiredString(m, "protocol")
+		if err != nil {
+			return "", err
+		}
+		if protocol != "HTTP" && protocol != "HTTPS" && protocol != "TCP" {
+			return "", fmt.Errorf("healthCheck protocol must be HTTP, HTTPS, or TCP, not %q", protocol)
+		}
+		port, err := requiredI64(m, "port")
+		if err != nil {
+			return "", err
+		}
+		if port < 1 || port > 65535 {
+			return "", fmt.Errorf("healthCheck port must be from 1 to 65535, not %d", port)
+		}
+		path, err := optionalString(m, "path")
+		if err != nil {
+			return "", err
+		}
+		if protocol == "TCP" && path != "" {
+			return "", fmt.Errorf("healthCheck path has no meaning with protocol TCP")
+		}
+		if protocol != "TCP" && path == "" {
+			path = "/"
+		}
+		host, err := optionalString(m, "host")
+		if err != nil {
+			return "", err
+		}
+		if host != "" && !isAddressOrReference(target) {
+			return "", fmt.Errorf("healthCheck host is accepted only when target is an address or a reference; a hostname target already names the host")
+		}
+		interval := int64(30)
+		if raw, ok := m["interval"]; ok && raw != nil {
+			if interval, err = requiredI64(m, "interval"); err != nil {
+				return "", err
+			}
+		}
+		if interval != 10 && interval != 30 {
+			return "", fmt.Errorf("healthCheck interval must be 10 or 30, not %d", interval)
+		}
+		threshold := int64(3)
+		if raw, ok := m["failureThreshold"]; ok && raw != nil {
+			if threshold, err = requiredI64(m, "failureThreshold"); err != nil {
+				return "", err
+			}
+		}
+		if threshold < 1 || threshold > 10 {
+			return "", fmt.Errorf("healthCheck failureThreshold must be from 1 to 10, not %d", threshold)
+		}
+		emails, err := requiredStrings(m, "emails")
+		if err != nil {
+			return "", err
+		}
+		if len(emails) == 0 {
+			return "", fmt.Errorf("healthCheck emails must not be empty")
+		}
+		item := HealthCheck{Provider: provider, Name: name, Target: target, Protocol: protocol, Port: port, Path: path, Host: host,
+			Interval: interval, FailureThreshold: threshold, Emails: emails, Alarm: true}
+		bundle.HealthChecks = append(bundle.HealthChecks, item)
+		return "healthCheck|" + item.Name, nil
+
 	case "staticAddress":
 		if err := rejectUnknown(m, []string{"kind", "provider", "name", "instance"}, ""); err != nil {
 			return "", err
@@ -697,4 +859,30 @@ func collectSpecPaths(directory string, paths *[]string) error {
 		}
 	}
 	return nil
+}
+
+// isAddressOrReference reports whether a health check target is an IP
+// address or a reference rather than a hostname.
+func isAddressOrReference(target string) bool {
+	if strings.HasPrefix(target, "${") {
+		return true
+	}
+	if strings.Contains(target, ":") {
+		return true
+	}
+	parts := strings.Split(target, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }

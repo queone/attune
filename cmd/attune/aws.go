@@ -112,14 +112,20 @@ func NewAwsProvider(cli AwsCli, region, profile string) *AwsProvider {
 // run executes one allowlisted command with JSON output and the configured
 // region and profile, and decodes the result into out when out is non-nil.
 func (p *AwsProvider) run(service, operation string, out any, args ...string) error {
+	return p.runIn(p.region, service, operation, out, args...)
+}
+
+// runIn is run with an explicit region, for the services that live in one
+// region regardless of the configured one.
+func (p *AwsProvider) runIn(region, service, operation string, out any, args ...string) error {
 	pair := service + " " + operation
 	if !awsAllowedCommands[pair] {
 		return fmt.Errorf("refuse to run `aws %s`: not an allowlisted command", pair)
 	}
 	argv := append([]string{service, operation}, args...)
 	argv = append(argv, "--output", "json")
-	if p.region != "" {
-		argv = append(argv, "--region", p.region)
+	if region != "" {
+		argv = append(argv, "--region", region)
 	}
 	if p.profile != "" {
 		argv = append(argv, "--profile", p.profile)
@@ -382,13 +388,20 @@ func init() {
 		"ec2 describe-iam-instance-profile-associations", "ec2 associate-iam-instance-profile", "ec2 replace-iam-instance-profile-association",
 		"ec2 describe-addresses", "ec2 allocate-address", "ec2 associate-address", "ec2 disassociate-address", "ec2 release-address",
 		"ssm get-parameter",
+		"budgets describe-budgets", "budgets list-tags-for-resource", "budgets describe-notifications-for-budget", "budgets describe-subscribers-for-notification",
+		"budgets create-budget", "budgets update-budget", "budgets create-notification", "budgets delete-notification", "budgets delete-budget",
+		"route53 create-health-check", "route53 change-tags-for-resource", "route53 get-health-check", "route53 update-health-check", "route53 delete-health-check", "route53 list-tags-for-resource",
+		"sns create-topic", "sns list-topics", "sns list-subscriptions-by-topic", "sns subscribe", "sns unsubscribe", "sns delete-topic",
+		"cloudwatch put-metric-alarm", "cloudwatch describe-alarms", "cloudwatch delete-alarms",
 	} {
 		awsAllowedCommands[pair] = true
 	}
 	spec := registry["aws"]
-	spec.Kinds = []string{"dnsRecordSet", "iamRole", "bucket", "firewall", "instance", "staticAddress"}
+	spec.Kinds = []string{"dnsRecordSet", "iamRole", "bucket", "firewall", "instance", "staticAddress", "budget", "healthCheck"}
 	registry["aws"] = spec
 }
+
+var _ MonitoringProvider = (*AwsProvider)(nil)
 
 var (
 	_ IamRoleProvider = (*AwsProvider)(nil)
@@ -406,6 +419,7 @@ type awsHostState struct {
 	instanceIDs map[string]string   // instance name -> instance id
 	groupNames  map[string]string   // group id -> firewall name
 	instNames   map[string]string   // instance id -> instance name
+	topics      map[string]string   // topic name -> topic ARN, nil until listed
 }
 
 func (p *AwsProvider) host() *awsHostState {
@@ -427,7 +441,7 @@ func (p *AwsProvider) managedARNs(resourceType string) ([]string, error) {
 		}
 		err := p.run("resourcegroupstaggingapi", "get-resources", &result,
 			"--tag-filters", `[{"Key":"`+awsManagedTagKey+`","Values":["`+awsManagedTagValue+`"]}]`,
-			"--resource-type-filters", "iam:role", "s3", "ec2:instance", "ec2:security-group", "ec2:elastic-ip")
+			"--resource-type-filters", "iam:role", "s3", "ec2:instance", "ec2:security-group", "ec2:elastic-ip", "route53:healthcheck")
 		if err != nil {
 			return nil, err
 		}
@@ -439,7 +453,8 @@ func (p *AwsProvider) managedARNs(resourceType string) ([]string, error) {
 	return h.arns[resourceType], nil
 }
 
-// arnType classifies an ARN as "iam:role", "s3", or "ec2:<resource>".
+// arnType classifies an ARN as "iam:role", "s3", "ec2:<resource>", or
+// "route53:<resource>".
 func arnType(arn string) string {
 	parts := strings.SplitN(arn, ":", 6)
 	if len(parts) < 6 {
@@ -451,8 +466,8 @@ func arnType(arn string) string {
 		return "s3"
 	case "iam":
 		return "iam:" + strings.SplitN(resource, "/", 2)[0]
-	case "ec2":
-		return "ec2:" + strings.SplitN(resource, "/", 2)[0]
+	case "ec2", "route53":
+		return service + ":" + strings.SplitN(resource, "/", 2)[0]
 	}
 	return service
 }
@@ -1234,12 +1249,13 @@ func metadataOptionsJSON(imdsv2 bool) string {
 }
 
 // PutInstance launches the instance when it has no live id, with its image
-// already resolved, and otherwise brings its mutable settings to the spec:
-// tags, metadata options, firewall, role, and root disk size.
-func (p *AwsProvider) PutInstance(instance Instance) error {
+// already resolved, returning the new id, and otherwise brings its mutable
+// settings to the spec: tags, metadata options, firewall, role, and root
+// disk size.
+func (p *AwsProvider) PutInstance(instance Instance) (string, error) {
 	groupID, err := p.firewallID(instance.Firewall)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if instance.ID == "" {
 		var images struct {
@@ -1248,10 +1264,10 @@ func (p *AwsProvider) PutInstance(instance Instance) error {
 			} `json:"Images"`
 		}
 		if err := p.run("ec2", "describe-images", &images, "--image-ids", instance.Image); err != nil {
-			return err
+			return "", err
 		}
 		if len(images.Images) != 1 {
-			return fmt.Errorf("image %s not found", instance.Image)
+			return "", fmt.Errorf("image %s not found", instance.Image)
 		}
 		mapping, _ := json.Marshal([]map[string]any{{"DeviceName": images.Images[0].RootDeviceName, "Ebs": map[string]any{
 			"VolumeSize": instance.RootDisk.Size, "VolumeType": instance.RootDisk.Type, "Encrypted": instance.RootDisk.Encrypted, "DeleteOnTermination": true}}})
@@ -1269,26 +1285,33 @@ func (p *AwsProvider) PutInstance(instance Instance) error {
 			Instances []awsInstance `json:"Instances"`
 		}
 		if err := p.run("ec2", "run-instances", &launched, args...); err != nil {
-			return err
+			return "", err
 		}
-		if len(launched.Instances) == 1 {
-			p.host().instanceIDs[instance.Name] = launched.Instances[0].InstanceID
-			p.host().instNames[launched.Instances[0].InstanceID] = instance.Name
+		if len(launched.Instances) != 1 {
+			return "", fmt.Errorf("run-instances returned %d instances, want 1", len(launched.Instances))
 		}
-		return nil
+		id := launched.Instances[0].InstanceID
+		p.host().instanceIDs[instance.Name] = id
+		p.host().instNames[id] = instance.Name
+		return id, nil
 	}
 
 	raw, err := p.describeInstances([]string{instance.ID})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(raw) != 1 {
-		return fmt.Errorf("instance %s not found", instance.ID)
+		return "", fmt.Errorf("instance %s not found", instance.ID)
 	}
 	current, err := p.instanceFrom(raw[0])
 	if err != nil {
-		return err
+		return "", err
 	}
+	return "", p.updateInstance(instance, current, raw[0], groupID)
+}
+
+// updateInstance brings a live instance's mutable settings to the spec.
+func (p *AwsProvider) updateInstance(instance, current Instance, raw awsInstance, groupID string) error {
 	if !tagsSatisfy(instance.Tags, current.Tags) {
 		tags := []map[string]string{}
 		for _, k := range sortedKeys(instance.Tags) {
@@ -1331,7 +1354,7 @@ func (p *AwsProvider) PutInstance(instance Instance) error {
 			return err
 		}
 	}
-	if volume := raw[0].rootVolumeID(); volume != "" && current.RootDisk.Size != instance.RootDisk.Size {
+	if volume := raw.rootVolumeID(); volume != "" && current.RootDisk.Size != instance.RootDisk.Size {
 		if err := p.run("ec2", "modify-volume", nil, "--volume-id", volume, "--size", strconv.FormatInt(instance.RootDisk.Size, 10)); err != nil {
 			return err
 		}
@@ -1459,4 +1482,416 @@ func (p *AwsProvider) DeleteAddress(address StaticAddress) error {
 		}
 	}
 	return p.run("ec2", "release-address", nil, "--allocation-id", address.ID)
+}
+
+// ---- Budgets
+
+// awsAlarmRegion is where Route 53 health check metrics live.
+const awsAlarmRegion = "us-east-1"
+
+type awsBudget struct {
+	Name  string `json:"BudgetName"`
+	Limit struct {
+		Amount string `json:"Amount"`
+		Unit   string `json:"Unit"`
+	} `json:"BudgetLimit"`
+	TimeUnit string `json:"TimeUnit"`
+	Type     string `json:"BudgetType"`
+}
+
+type awsNotification struct {
+	Type       string  `json:"NotificationType"`
+	Operator   string  `json:"ComparisonOperator"`
+	Threshold  float64 `json:"Threshold"`
+	ThreshType string  `json:"ThresholdType"`
+}
+
+func (p *AwsProvider) accountID() (string, error) {
+	if p.account.Tenant == "" {
+		return "", fmt.Errorf("budgets need the grounded account id; run Ground first")
+	}
+	return p.account.Tenant, nil
+}
+
+func notificationJSON(alert BudgetAlert) string {
+	kind := "ACTUAL"
+	if alert.Forecast {
+		kind = "FORECASTED"
+	}
+	b, _ := json.Marshal(map[string]any{"NotificationType": kind, "ComparisonOperator": "GREATER_THAN", "Threshold": alert.Threshold, "ThresholdType": "PERCENTAGE"})
+	return string(b)
+}
+
+func subscribersJSON(emails []string) string {
+	var subs []map[string]string
+	for _, e := range normalized(emails) {
+		subs = append(subs, map[string]string{"SubscriptionType": "EMAIL", "Address": e})
+	}
+	b, _ := json.Marshal(subs)
+	return string(b)
+}
+
+// ListBudgets returns every monthly cost budget attune created, with its
+// alerts.
+func (p *AwsProvider) ListBudgets() ([]Budget, error) {
+	account, err := p.accountID()
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Budgets []awsBudget `json:"Budgets"`
+	}
+	if err := p.run("budgets", "describe-budgets", &result, "--account-id", account); err != nil {
+		return nil, err
+	}
+	var budgets []Budget
+	for _, b := range result.Budgets {
+		var tags struct {
+			ResourceTags []struct {
+				Key   string `json:"Key"`
+				Value string `json:"Value"`
+			} `json:"ResourceTags"`
+		}
+		if err := p.run("budgets", "list-tags-for-resource", &tags, "--resource-arn", "arn:aws:budgets::"+account+":budget/"+b.Name); err != nil {
+			return nil, err
+		}
+		managed := false
+		for _, t := range tags.ResourceTags {
+			managed = managed || (t.Key == awsManagedTagKey && t.Value == awsManagedTagValue)
+		}
+		if !managed {
+			continue
+		}
+		budget := Budget{Name: b.Name, Amount: b.Limit.Amount, Currency: b.Limit.Unit}
+		var notifications struct {
+			Notifications []awsNotification `json:"Notifications"`
+		}
+		if err := p.run("budgets", "describe-notifications-for-budget", &notifications, "--account-id", account, "--budget-name", b.Name); err != nil {
+			return nil, err
+		}
+		for _, n := range notifications.Notifications {
+			raw, _ := json.Marshal(n)
+			var subs struct {
+				Subscribers []struct {
+					Address string `json:"Address"`
+				} `json:"Subscribers"`
+			}
+			if err := p.run("budgets", "describe-subscribers-for-notification", &subs, "--account-id", account, "--budget-name", b.Name, "--notification", string(raw)); err != nil {
+				return nil, err
+			}
+			alert := BudgetAlert{Threshold: int64(n.Threshold), Forecast: n.Type == "FORECASTED"}
+			for _, s := range subs.Subscribers {
+				alert.Emails = append(alert.Emails, s.Address)
+			}
+			budget.Alerts = append(budget.Alerts, alert)
+		}
+		budgets = append(budgets, budget)
+	}
+	sort.Slice(budgets, func(i, j int) bool { return budgets[i].Name < budgets[j].Name })
+	return budgets, nil
+}
+
+func budgetJSON(budget Budget) string {
+	b, _ := json.Marshal(map[string]any{
+		"BudgetName":  budget.Name,
+		"BudgetLimit": map[string]string{"Amount": budget.Amount, "Unit": budget.Currency},
+		"TimeUnit":    "MONTHLY",
+		"BudgetType":  "COST",
+	})
+	return string(b)
+}
+
+// PutBudget creates the budget with its alerts and the managed tag, or
+// updates its limit and reconciles its alerts.
+func (p *AwsProvider) PutBudget(budget Budget) error {
+	account, err := p.accountID()
+	if err != nil {
+		return err
+	}
+	live, err := p.ListBudgets()
+	if err != nil {
+		return err
+	}
+	current, exists := findBudget(live, budget.Name)
+	if !exists {
+		var with []map[string]any
+		for _, alert := range budget.Alerts {
+			var notification, subscribers any
+			_ = json.Unmarshal([]byte(notificationJSON(alert)), &notification)
+			_ = json.Unmarshal([]byte(subscribersJSON(alert.Emails)), &subscribers)
+			with = append(with, map[string]any{"Notification": notification, "Subscribers": subscribers})
+		}
+		encoded, _ := json.Marshal(with)
+		return p.run("budgets", "create-budget", nil, "--account-id", account, "--budget", budgetJSON(budget),
+			"--notifications-with-subscribers", string(encoded), "--resource-tags", awsTagsJSON(""))
+	}
+	if !sameAmount(current.Amount, budget.Amount) || current.Currency != budget.Currency {
+		if err := p.run("budgets", "update-budget", nil, "--account-id", account, "--new-budget", budgetJSON(budget)); err != nil {
+			return err
+		}
+	}
+	want := map[string]BudgetAlert{}
+	for _, a := range budget.Alerts {
+		want[a.key()] = a
+	}
+	have := map[string]BudgetAlert{}
+	for _, a := range current.Alerts {
+		have[a.key()] = a
+	}
+	for _, k := range sortedAlertKeys(have) {
+		if _, ok := want[k]; !ok {
+			if err := p.run("budgets", "delete-notification", nil, "--account-id", account, "--budget-name", budget.Name, "--notification", notificationJSON(have[k])); err != nil {
+				return err
+			}
+		}
+	}
+	for _, k := range sortedAlertKeys(want) {
+		if _, ok := have[k]; !ok {
+			if err := p.run("budgets", "create-notification", nil, "--account-id", account, "--budget-name", budget.Name,
+				"--notification", notificationJSON(want[k]), "--subscribers", subscribersJSON(want[k].Emails)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func sortedAlertKeys(m map[string]BudgetAlert) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// DeleteBudget deletes the budget and its notifications with it.
+func (p *AwsProvider) DeleteBudget(budget Budget) error {
+	account, err := p.accountID()
+	if err != nil {
+		return err
+	}
+	return p.run("budgets", "delete-budget", nil, "--account-id", account, "--budget-name", budget.Name)
+}
+
+// ---- Health checks
+
+type awsHealthCheckConfig struct {
+	IPAddress        string `json:"IPAddress,omitempty"`
+	Port             int64  `json:"Port,omitempty"`
+	Type             string `json:"Type"`
+	ResourcePath     string `json:"ResourcePath,omitempty"`
+	FQDN             string `json:"FullyQualifiedDomainName,omitempty"`
+	RequestInterval  int64  `json:"RequestInterval"`
+	FailureThreshold int64  `json:"FailureThreshold"`
+}
+
+func awsTopicName(check string) string { return "attune-" + check }
+
+// topicARN finds the topic for a check by name among the account's topics,
+// reading the list once per run.
+func (p *AwsProvider) topicARN(check string) (string, error) {
+	h := p.host()
+	if h.topics == nil {
+		var result struct {
+			Topics []struct {
+				ARN string `json:"TopicArn"`
+			} `json:"Topics"`
+		}
+		if err := p.run("sns", "list-topics", &result); err != nil {
+			return "", err
+		}
+		h.topics = map[string]string{}
+		for _, t := range result.Topics {
+			h.topics[arnName(t.ARN)] = t.ARN
+		}
+	}
+	return h.topics[awsTopicName(check)], nil
+}
+
+// ListHealthChecks returns every health check attune created, with its
+// probe, its email subscriptions, and whether its alarm exists.
+func (p *AwsProvider) ListHealthChecks() ([]HealthCheck, error) {
+	arns, err := p.managedARNs("route53:healthcheck")
+	if err != nil {
+		return nil, err
+	}
+	var checks []HealthCheck
+	for _, arn := range arns {
+		id := arnName(arn)
+		var result struct {
+			HealthCheck struct {
+				Config awsHealthCheckConfig `json:"HealthCheckConfig"`
+			} `json:"HealthCheck"`
+		}
+		if err := p.run("route53", "get-health-check", &result, "--health-check-id", id); err != nil {
+			return nil, err
+		}
+		var tags struct {
+			ResourceTagSet struct {
+				Tags []struct {
+					Key   string `json:"Key"`
+					Value string `json:"Value"`
+				} `json:"Tags"`
+			} `json:"ResourceTagSet"`
+		}
+		if err := p.run("route53", "list-tags-for-resource", &tags, "--resource-type", "healthcheck", "--resource-id", id); err != nil {
+			return nil, err
+		}
+		cfg := result.HealthCheck.Config
+		check := HealthCheck{ID: id, Protocol: cfg.Type, Port: cfg.Port, Path: cfg.ResourcePath, Interval: cfg.RequestInterval, FailureThreshold: cfg.FailureThreshold}
+		for _, t := range tags.ResourceTagSet.Tags {
+			if t.Key == "Name" {
+				check.Name = t.Value
+			}
+		}
+		if cfg.IPAddress != "" {
+			check.Target, check.Host = cfg.IPAddress, cfg.FQDN
+		} else {
+			check.Target = cfg.FQDN
+		}
+		topic, err := p.topicARN(check.Name)
+		if err != nil {
+			return nil, err
+		}
+		if topic != "" {
+			var subs struct {
+				Subscriptions []struct {
+					Endpoint string `json:"Endpoint"`
+					Protocol string `json:"Protocol"`
+				} `json:"Subscriptions"`
+			}
+			if err := p.run("sns", "list-subscriptions-by-topic", &subs, "--topic-arn", topic); err != nil {
+				return nil, err
+			}
+			for _, s := range subs.Subscriptions {
+				if s.Protocol == "email" {
+					check.Emails = append(check.Emails, s.Endpoint)
+				}
+			}
+		}
+		var alarms struct {
+			MetricAlarms []struct {
+				Name string `json:"AlarmName"`
+			} `json:"MetricAlarms"`
+		}
+		if err := p.runIn(awsAlarmRegion, "cloudwatch", "describe-alarms", &alarms, "--alarm-names", awsTopicName(check.Name)); err != nil {
+			return nil, err
+		}
+		check.Alarm = len(alarms.MetricAlarms) == 1
+		checks = append(checks, check)
+	}
+	sort.Slice(checks, func(i, j int) bool { return checks[i].Name < checks[j].Name })
+	return checks, nil
+}
+
+func healthCheckConfigJSON(check HealthCheck) string {
+	cfg := awsHealthCheckConfig{Port: check.Port, Type: check.Protocol, ResourcePath: check.Path, RequestInterval: check.Interval, FailureThreshold: check.FailureThreshold}
+	if isAddressOrReference(check.Target) {
+		cfg.IPAddress, cfg.FQDN = check.Target, check.Host
+	} else {
+		cfg.FQDN = check.Target
+	}
+	b, _ := json.Marshal(cfg)
+	return string(b)
+}
+
+// PutHealthCheck creates or updates the Route 53 check with its target
+// already resolved, then brings the topic, its email subscriptions, and the
+// alarm in us-east-1 to the spec.
+func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
+	if check.ID == "" {
+		var created struct {
+			HealthCheck struct {
+				ID string `json:"Id"`
+			} `json:"HealthCheck"`
+		}
+		if err := p.run("route53", "create-health-check", &created, "--caller-reference", p.reference(), "--health-check-config", healthCheckConfigJSON(check)); err != nil {
+			return err
+		}
+		check.ID = created.HealthCheck.ID
+		if err := p.run("route53", "change-tags-for-resource", nil, "--resource-type", "healthcheck", "--resource-id", check.ID, "--add-tags", awsTagsJSON(check.Name)); err != nil {
+			return err
+		}
+	} else {
+		args := []string{"--health-check-id", check.ID, "--port", strconv.FormatInt(check.Port, 10), "--failure-threshold", strconv.FormatInt(check.FailureThreshold, 10)}
+		if isAddressOrReference(check.Target) {
+			args = append(args, "--ip-address", check.Target)
+			if check.Host != "" {
+				args = append(args, "--fully-qualified-domain-name", check.Host)
+			}
+		} else {
+			args = append(args, "--fully-qualified-domain-name", check.Target)
+		}
+		if check.Path != "" {
+			args = append(args, "--resource-path", check.Path)
+		}
+		if err := p.run("route53", "update-health-check", nil, args...); err != nil {
+			return err
+		}
+	}
+	var topic struct {
+		ARN string `json:"TopicArn"`
+	}
+	if err := p.run("sns", "create-topic", &topic, "--name", awsTopicName(check.Name), "--tags", awsTagsJSON("")); err != nil {
+		return err
+	}
+	if p.host().topics == nil {
+		p.host().topics = map[string]string{}
+	}
+	p.host().topics[awsTopicName(check.Name)] = topic.ARN
+	var subs struct {
+		Subscriptions []struct {
+			Endpoint string `json:"Endpoint"`
+			Protocol string `json:"Protocol"`
+			ARN      string `json:"SubscriptionArn"`
+		} `json:"Subscriptions"`
+	}
+	if err := p.run("sns", "list-subscriptions-by-topic", &subs, "--topic-arn", topic.ARN); err != nil {
+		return err
+	}
+	present := map[string]string{}
+	for _, s := range subs.Subscriptions {
+		if s.Protocol == "email" {
+			present[s.Endpoint] = s.ARN
+		}
+	}
+	for _, email := range normalized(check.Emails) {
+		if _, ok := present[email]; !ok {
+			if err := p.run("sns", "subscribe", nil, "--topic-arn", topic.ARN, "--protocol", "email", "--notification-endpoint", email); err != nil {
+				return err
+			}
+		}
+	}
+	for _, email := range sortedKeys(present) {
+		arn := present[email]
+		if !slices.Contains(check.Emails, email) && strings.HasPrefix(arn, "arn:") {
+			if err := p.run("sns", "unsubscribe", nil, "--subscription-arn", arn); err != nil {
+				return err
+			}
+		}
+	}
+	return p.runIn(awsAlarmRegion, "cloudwatch", "put-metric-alarm", nil,
+		"--alarm-name", awsTopicName(check.Name), "--namespace", "AWS/Route53", "--metric-name", "HealthCheckStatus",
+		"--dimensions", `[{"Name":"HealthCheckId","Value":"`+check.ID+`"}]`,
+		"--statistic", "Minimum", "--period", "60", "--evaluation-periods", "1", "--threshold", "1",
+		"--comparison-operator", "LessThanThreshold", "--treat-missing-data", "breaching",
+		"--alarm-actions", topic.ARN, "--ok-actions", topic.ARN, "--tags", awsTagsJSON(""))
+}
+
+// DeleteHealthCheck removes the alarm, the topic, and the check.
+func (p *AwsProvider) DeleteHealthCheck(check HealthCheck) error {
+	if err := p.runIn(awsAlarmRegion, "cloudwatch", "delete-alarms", nil, "--alarm-names", awsTopicName(check.Name)); err != nil {
+		return err
+	}
+	topic, err := p.topicARN(check.Name)
+	if err != nil {
+		return err
+	}
+	if topic != "" {
+		if err := p.run("sns", "delete-topic", nil, "--topic-arn", topic); err != nil {
+			return err
+		}
+	}
+	return p.run("route53", "delete-health-check", nil, "--health-check-id", check.ID)
 }

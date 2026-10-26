@@ -341,13 +341,13 @@ func TestApplyReportsEachSuccessfulChangeInOrder(t *testing.T) {
 		{Kind: "dnsRecordSet", Action: ActionDelete, Key: "c", Target: Target{Kind: TargetDns}},
 	}
 	var seen []string
-	if err := Apply(&fakeProvider{}, changes, "sub", func(c Change) { seen = append(seen, c.Key) }); err != nil {
+	if err := Apply(&fakeProvider{}, changes, &Options{Subscription: "sub"}, func(c Change) { seen = append(seen, c.Key) }); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if want := []string{"a", "b", "c"}; !slices.Equal(seen, want) {
 		t.Errorf("reported keys = %v, want %v", seen, want)
 	}
-	if err := Apply(&fakeProvider{}, changes, "sub", nil); err != nil {
+	if err := Apply(&fakeProvider{}, changes, &Options{Subscription: "sub"}, nil); err != nil {
 		t.Errorf("Apply with nil reporter: %v", err)
 	}
 }
@@ -359,7 +359,7 @@ func TestApplyMidRunFailureReportsOnlyAppliedChanges(t *testing.T) {
 		{Kind: "dnsRecordSet", Action: ActionCreate, Key: "c", Target: Target{Kind: TargetDns}},
 	}
 	var seen []string
-	err := Apply(&applyFailProvider{}, changes, "sub", func(c Change) { seen = append(seen, c.Key) })
+	err := Apply(&applyFailProvider{}, changes, &Options{Subscription: "sub"}, func(c Change) { seen = append(seen, c.Key) })
 	if err == nil {
 		t.Fatal("Apply: expected mid-run failure, got nil error")
 	}
@@ -404,7 +404,7 @@ func TestApplyCreatesOnlyPlannedMissingZones(t *testing.T) {
 		{Kind: "dnsRecordSet", Action: ActionCreate, Key: "www", Target: Target{Kind: TargetDns}},
 	}
 	var seen []string
-	if err := Apply(provider, changes, "sub", func(c Change) { seen = append(seen, c.Key) }); err != nil {
+	if err := Apply(provider, changes, &Options{Subscription: "sub"}, func(c Change) { seen = append(seen, c.Key) }); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if want := []string{"new.com"}; !slices.Equal(provider.ensured, want) {
@@ -414,7 +414,7 @@ func TestApplyCreatesOnlyPlannedMissingZones(t *testing.T) {
 		t.Errorf("reported keys = %v, want %v", seen, want)
 	}
 	noZones := &fakeProvider{}
-	if err := Apply(noZones, changes[1:], "sub", nil); err != nil {
+	if err := Apply(noZones, changes[1:], &Options{Subscription: "sub"}, nil); err != nil {
 		t.Fatalf("Apply without zone changes: %v", err)
 	}
 	if len(noZones.ensured) != 0 {
@@ -523,7 +523,7 @@ func TestPlanRejectsKindTheProviderLacks(t *testing.T) {
 	if err != nil || len(changes) != 1 || changes[0].Kind != "dnsRecordSet" {
 		t.Fatalf("Plan with a supported kind: changes=%v err=%v", changes, err)
 	}
-	applyErr := Apply(provider, []Change{{Kind: "securityGroup", Action: ActionCreate, Target: Target{Kind: TargetGroup, Group: SecurityGroup{Name: "eng"}}}}, "", nil)
+	applyErr := Apply(provider, []Change{{Kind: "securityGroup", Action: ActionCreate, Target: Target{Kind: TargetGroup, Group: SecurityGroup{Name: "eng"}}}}, &Options{}, nil)
 	if applyErr == nil || !strings.Contains(applyErr.Error(), "lacks the identity capability") {
 		t.Fatalf("Apply with an unsupported target: %v", applyErr)
 	}
@@ -545,8 +545,21 @@ func TestHostKindsNeedTheirCapabilities(t *testing.T) {
 			t.Errorf("%s: %v", kind, err)
 		}
 	}
-	err := Apply(provider, []Change{{Kind: "bucket", Action: ActionCreate, Target: Target{Kind: TargetBucket}}}, "", nil)
+	err := Apply(provider, []Change{{Kind: "bucket", Action: ActionCreate, Target: Target{Kind: TargetBucket}}}, &Options{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "lacks the storage capability") {
 		t.Errorf("Apply bucket: %v", err)
+	}
+}
+
+func TestMonitoringKindsNeedTheirCapability(t *testing.T) {
+	provider := &dnsOnlyProvider{}
+	for kind, bundle := range map[string]*Bundle{
+		"budget":      {Budgets: []Budget{{Name: "b"}}},
+		"healthCheck": {HealthChecks: []HealthCheck{{Name: "h", Target: "192.0.2.1"}}},
+	} {
+		_, err := Plan(provider, bundle, &Options{Provider: "dnsonly"})
+		if err == nil || err.Error() != `provider "dnsonly" does not support kind "`+kind+`"` {
+			t.Errorf("%s: %v", kind, err)
+		}
 	}
 }

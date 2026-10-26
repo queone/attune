@@ -154,3 +154,13 @@ func TestPruneHostsParsesFromConfig(t *testing.T) {
 		t.Error("PruneHosts on without config")
 	}
 }
+
+func TestPruneMonitoringParsesFromConfig(t *testing.T) {
+	cfg, err := ParseConfig([]byte("provider: aws\nprune:\n  monitoring: true\n"))
+	if err != nil || cfg.PruneMonitoring == nil || !*cfg.PruneMonitoring || !Resolve(cfg, Overrides{}).PruneMonitoring {
+		t.Errorf("prune.monitoring: cfg=%+v err=%v", cfg, err)
+	}
+	if Resolve(&Config{}, Overrides{}).PruneMonitoring {
+		t.Error("PruneMonitoring on without config")
+	}
+}

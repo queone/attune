@@ -78,16 +78,29 @@ type NetworkProvider interface {
 // ComputeProvider is the capability a provider offers for instance and
 // staticAddress specs. Live instances and addresses are the ones the
 // provider itself created. ResolveImage turns a parameter path into an
-// image id and returns an image id unchanged. PutAddress returns the public
-// address so apply can show it.
+// image id and returns an image id unchanged. PutInstance returns the id of
+// an instance it launched, empty on an update; PutAddress returns the
+// public address. Both feed references and the applied line.
 type ComputeProvider interface {
 	ResolveImage(image string) (string, error)
 	ListInstances() ([]Instance, error)
-	PutInstance(instance Instance) error
+	PutInstance(instance Instance) (string, error)
 	DeleteInstance(instance Instance) error
 	ListAddresses() ([]StaticAddress, error)
 	PutAddress(address StaticAddress) (string, error)
 	DeleteAddress(address StaticAddress) error
+}
+
+// MonitoringProvider is the capability a provider offers for budget and
+// healthCheck specs. Live budgets and checks are the ones the provider
+// itself created.
+type MonitoringProvider interface {
+	ListBudgets() ([]Budget, error)
+	PutBudget(budget Budget) error
+	DeleteBudget(budget Budget) error
+	ListHealthChecks() ([]HealthCheck, error)
+	PutHealthCheck(check HealthCheck) error
+	DeleteHealthCheck(check HealthCheck) error
 }
 
 // Provider is the union of the Azure-shaped capabilities: DNS, identity,

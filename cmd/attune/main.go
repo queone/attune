@@ -20,7 +20,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.9.0"
+	programVersion = "1.10.0"
 )
 
 var validKinds = []string{
@@ -35,6 +35,8 @@ var validKinds = []string{
 	"firewall",
 	"instance",
 	"staticAddress",
+	"budget",
+	"healthCheck",
 }
 
 type commandKind int
@@ -198,6 +200,7 @@ type plannedProvider struct {
 	name     string
 	provider LiveProvider
 	account  Account
+	options  *Options
 	changes  []Change
 }
 
@@ -242,6 +245,7 @@ func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle
 			PruneRoles:          settings.PruneRoles,
 			PruneResourceGroups: settings.PruneResourceGroups,
 			PruneHosts:          settings.PruneHosts,
+			PruneMonitoring:     settings.PruneMonitoring,
 		}
 		changes, err := Plan(provider, part, options)
 		if err != nil {
@@ -249,14 +253,14 @@ func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle
 			return 1
 		}
 		fmt.Fprint(a.stdout, renderPlanBlock(name, changes, settings.Verbose))
-		plans = append(plans, plannedProvider{name: name, provider: provider, account: account, changes: changes})
+		plans = append(plans, plannedProvider{name: name, provider: provider, account: account, options: options, changes: changes})
 	}
 	if cmd != cmdApply {
 		return 0
 	}
 	for _, p := range plans {
 		fmt.Fprintln(a.stdout, applyHeader(p.name))
-		if err := Apply(p.provider, p.changes, p.account.Subscription, func(c Change) {
+		if err := Apply(p.provider, p.changes, p.options, func(c Change) {
 			fmt.Fprintln(a.stdout, renderAppliedLine(c))
 		}); err != nil {
 			a.errorf("apply provider change: %s", err)
@@ -503,6 +507,12 @@ func parseFlags(args []string) (Overrides, error) {
 				return overrides, err
 			}
 			overrides.PruneHosts = &b
+		case "-M", "--prune-monitoring":
+			b, err := boolValue(inline)
+			if err != nil {
+				return overrides, err
+			}
+			overrides.PruneMonitoring = &b
 		case "-d", "--diagnostic":
 			if inline != nil {
 				return overrides, fmt.Errorf("%s does not take a value", name)
@@ -548,7 +558,7 @@ func helpDoc() help.Doc {
 		Description: "Reconcile cloud state from YAML specs kept in an encrypted store",
 		URL:         "github.com/queone/" + programName,
 		Sections: []help.Section{
-			{Title: "Usage", Rows: []help.Row{{Form: programName + " COMMAND [flags]", Meaning: "Keep DNS, groups, app registrations, roles, resource groups, and hosts matching the stored specs"}},
+			{Title: "Usage", Rows: []help.Row{{Form: programName + " COMMAND [flags]", Meaning: "Keep DNS, groups, app registrations, roles, resource groups, hosts, budgets, and health checks matching the stored specs"}},
 				Lines: []string{
 					"Store path order: -t, then ATTUNE_STORE, then the path init -t remembered in",
 					"$XDG_CONFIG_HOME/attune/store, then $XDG_DATA_HOME/attune/attune.store.",
@@ -591,6 +601,7 @@ func helpDoc() help.Doc {
 				{Form: "-R, --prune-roles[=BOOL]", Meaning: "Delete unmanaged role definitions and assignments; off by default"},
 				{Form: "-G, --prune-resource-groups[=BOOL]", Meaning: "Delete unmanaged resource groups; off by default"},
 				{Form: "-H, --prune-hosts[=BOOL]", Meaning: "Delete unmanaged instances, addresses, firewalls, buckets, and IAM roles; off by default"},
+				{Form: "-M, --prune-monitoring[=BOOL]", Meaning: "Delete unmanaged budgets and health checks; off by default"},
 				{Form: "-d, --diagnostic", Meaning: "Print non-secret account and target grounding on live commands"},
 				{Form: "-V, --verbose", Meaning: "Field-level detail on plan and apply"},
 				{Form: "-N, --new", Meaning: "Create a new store (init)"},

@@ -1,4 +1,5 @@
-# Synthetic Route 53 intent using IANA and TEST-NET documentation values.
+# Synthetic Route 53 intent: the record takes its value from the example
+# host's static address, so host and record apply in one pass.
 kind: dnsRecordSet
 provider: aws
 zone: example.com
@@ -6,4 +7,4 @@ type: A
 name: docs
 ttl: 300
 values:
-  - 192.0.2.10
+  - ${staticAddress:example-host:publicIp}

@@ -51,6 +51,8 @@ const (
 	TargetFirewall
 	TargetInstance
 	TargetAddress
+	TargetBudget
+	TargetHealthCheck
 )
 
 // RoleAssignmentTarget carries a role-assignment change's resolved identity.
@@ -76,6 +78,8 @@ type Target struct {
 	Firewall       Firewall
 	Instance       Instance
 	Address        StaticAddress
+	Budget         Budget
+	HealthCheck    HealthCheck
 }
 
 // Change is one planned create/update/delete action. Diffs carries the
@@ -100,6 +104,18 @@ type Options struct {
 	PruneRoles          bool
 	PruneResourceGroups bool
 	PruneHosts          bool
+	PruneMonitoring     bool
+	// Outputs collects live outputs during Plan and applied outputs during
+	// Apply, so a record value can reference another spec. Created when nil.
+	Outputs *Outputs
+}
+
+// outputs returns the run's output set, creating it on first use.
+func (o *Options) outputs() *Outputs {
+	if o.Outputs == nil {
+		o.Outputs = NewOutputs()
+	}
+	return o.Outputs
 }
 
 // LiveAssignment is a role assignment as read from the live provider.
@@ -382,9 +398,22 @@ func Plan(provider LiveProvider, bundle *Bundle, options *Options) ([]Change, er
 		}
 	}
 
+	budgetDeletes, err := planBudgets(provider, bundle, options, &changes)
+	if err != nil {
+		return nil, err
+	}
 	if err := planHost(provider, bundle, options, &changes); err != nil {
 		return nil, err
 	}
+	if (wanted(options, "dnsRecordSet") && len(bundle.Dns) > 0) || (wanted(options, "healthCheck") && len(bundle.HealthChecks) > 0) {
+		if err := recordReferencedOutputs(provider, bundle, options); err != nil {
+			return nil, err
+		}
+	}
+	if err := planHealthChecks(provider, bundle, options, &changes); err != nil {
+		return nil, err
+	}
+	changes = append(changes, budgetDeletes...)
 
 	if wanted(options, "dnsRecordSet") && len(bundle.Dns) > 0 {
 		dns, ok := provider.(DNSProvider)
@@ -507,13 +536,22 @@ func planDNS(provider DNSProvider, bundle *Bundle, options *Options, changes *[]
 			desiredKeys[item.Key()] = true
 		}
 		for _, item := range desired {
+			resolved := item
+			var pending []Reference
+			resolved.Values, pending = options.outputs().Resolve(item.Values)
 			current, found := findDNS(live, item.Key())
 			switch {
+			case !found && len(pending) > 0:
+				*changes = append(*changes, change("dnsRecordSet", ActionCreate, item.Key(), pendingSummary(pending), Target{Kind: TargetDns, Dns: item}))
 			case !found:
-				*changes = append(*changes, change("dnsRecordSet", ActionCreate, item.Key(), "missing", Target{Kind: TargetDns, Dns: item}))
-			case !current.SameData(item):
-				c := change("dnsRecordSet", ActionUpdate, item.Key(), "TTL or values differ", Target{Kind: TargetDns, Dns: item})
-				c.Diffs = dnsRecordDiffs(current, item)
+				*changes = append(*changes, change("dnsRecordSet", ActionCreate, item.Key(), "missing", Target{Kind: TargetDns, Dns: resolved}))
+			case len(pending) > 0:
+				c := change("dnsRecordSet", ActionUpdate, item.Key(), pendingSummary(pending), Target{Kind: TargetDns, Dns: item})
+				c.Diffs = dnsRecordDiffs(current, resolved)
+				*changes = append(*changes, c)
+			case !current.SameData(resolved):
+				c := change("dnsRecordSet", ActionUpdate, item.Key(), "TTL or values differ", Target{Kind: TargetDns, Dns: resolved})
+				c.Diffs = dnsRecordDiffs(current, resolved)
 				*changes = append(*changes, c)
 			}
 		}
@@ -615,16 +653,18 @@ func dnsProtected(item DnsRecord) bool {
 
 // Apply performs every planned Change against provider, in order,
 // invoking report after each successful mutation when report is non-nil.
-// A replace change is refused, since the field it names is immutable. Plan
+// It records each applied address and instance in options.Outputs and
+// fills a record's references from them before the record is sent. A
+// replace change is refused, since the field it names is immutable. Plan
 // only emits changes for kinds the provider supports, so a missing
 // capability here is a programming error reported by kind.
-func Apply(provider LiveProvider, changes []Change, subscription string, report func(Change)) error {
+func Apply(provider LiveProvider, changes []Change, options *Options, report func(Change)) error {
 	for i := range changes {
 		c := changes[i]
 		if c.Action == ActionReplace {
 			return fmt.Errorf("replace %s %s: %s; remove the spec, apply, then add it back", c.Kind, c.Key, c.Summary)
 		}
-		if err := applyChange(provider, &c, subscription); err != nil {
+		if err := applyChange(provider, &c, options); err != nil {
 			return err
 		}
 		if report != nil {
@@ -637,7 +677,9 @@ func Apply(provider LiveProvider, changes []Change, subscription string, report 
 // applyChange performs one Change through the capability its target needs.
 // It may amend the change's summary with a result worth showing, such as
 // the public address a staticAddress received.
-func applyChange(provider LiveProvider, c *Change, subscription string) error {
+func applyChange(provider LiveProvider, c *Change, options *Options) error {
+	subscription := options.Subscription
+	outputs := options.outputs()
 	lacks := func(capability string) error {
 		return fmt.Errorf("apply %s: provider lacks the %s capability", c.Kind, capability)
 	}
@@ -669,6 +711,30 @@ func applyChange(provider LiveProvider, c *Change, subscription string) error {
 			return network.DeleteFirewall(c.Target.Firewall)
 		}
 		return network.PutFirewall(c.Target.Firewall)
+	case TargetBudget:
+		monitoring, ok := provider.(MonitoringProvider)
+		if !ok {
+			return lacks("monitoring")
+		}
+		if c.Action == ActionDelete {
+			return monitoring.DeleteBudget(c.Target.Budget)
+		}
+		return monitoring.PutBudget(c.Target.Budget)
+	case TargetHealthCheck:
+		monitoring, ok := provider.(MonitoringProvider)
+		if !ok {
+			return lacks("monitoring")
+		}
+		if c.Action == ActionDelete {
+			return monitoring.DeleteHealthCheck(c.Target.HealthCheck)
+		}
+		check := c.Target.HealthCheck
+		resolved, pending := outputs.Resolve([]string{check.Target})
+		if len(pending) > 0 {
+			return fmt.Errorf("reference %s is not resolved; apply its target first", pending[0])
+		}
+		check.Target = resolved[0]
+		return monitoring.PutHealthCheck(check)
 	case TargetInstance, TargetAddress:
 		compute, ok := provider.(ComputeProvider)
 		if !ok {
@@ -678,13 +744,18 @@ func applyChange(provider LiveProvider, c *Change, subscription string) error {
 		case c.Target.Kind == TargetInstance && c.Action == ActionDelete:
 			return compute.DeleteInstance(c.Target.Instance)
 		case c.Target.Kind == TargetInstance:
-			return compute.PutInstance(c.Target.Instance)
+			id, err := compute.PutInstance(c.Target.Instance)
+			if err == nil {
+				outputs.Record("instance", c.Target.Instance.Name, "id", id)
+			}
+			return err
 		case c.Action == ActionDelete:
 			return compute.DeleteAddress(c.Target.Address)
 		default:
 			ip, err := compute.PutAddress(c.Target.Address)
 			if err == nil && ip != "" {
 				c.Summary = "address " + ip
+				outputs.Record("staticAddress", c.Target.Address.Name, "publicIp", ip)
 			}
 			return err
 		}
@@ -699,7 +770,13 @@ func applyChange(provider LiveProvider, c *Change, subscription string) error {
 		if c.Action == ActionDelete {
 			return dns.DeleteDNS(c.Target.Dns)
 		}
-		return dns.PutDNS(c.Target.Dns)
+		record := c.Target.Dns
+		var pending []Reference
+		record.Values, pending = outputs.Resolve(record.Values)
+		if len(pending) > 0 {
+			return fmt.Errorf("reference %s is not resolved; apply its target first", pending[0])
+		}
+		return dns.PutDNS(record)
 	case TargetGroup, TargetApp:
 		identity, ok := provider.(IdentityProvider)
 		if !ok {
@@ -865,6 +942,7 @@ func planHost(provider LiveProvider, bundle *Bundle, options *Options, changes *
 		if err != nil {
 			return err
 		}
+		recordInstanceOutputs(options, live)
 		desired := map[string]bool{}
 		for _, item := range bundle.Instances {
 			desired[item.Name] = true
@@ -929,6 +1007,7 @@ func planHost(provider LiveProvider, bundle *Bundle, options *Options, changes *
 		if err != nil {
 			return err
 		}
+		recordAddressOutputs(options, live)
 		desired := map[string]bool{}
 		for _, item := range bundle.Addresses {
 			desired[item.Name] = true
@@ -1073,4 +1152,197 @@ func instanceDiffs(current, desired Instance) []FieldDiff {
 		}
 	}
 	return diffs
+}
+
+func recordInstanceOutputs(options *Options, live []Instance) {
+	outputs := options.outputs()
+	for _, item := range live {
+		outputs.Record("instance", item.Name, "id", item.ID)
+	}
+	outputs.listed["instance"] = true
+}
+
+func recordAddressOutputs(options *Options, live []StaticAddress) {
+	outputs := options.outputs()
+	for _, item := range live {
+		outputs.Record("staticAddress", item.Name, "publicIp", item.PublicIP)
+	}
+	outputs.listed["staticAddress"] = true
+}
+
+// recordReferencedOutputs lists the kinds the bundle's records reference
+// when planning has not already listed them, such as under -k
+// dnsRecordSet, so references resolve from live state regardless of the
+// kind filter.
+func recordReferencedOutputs(provider LiveProvider, bundle *Bundle, options *Options) error {
+	outputs := options.outputs()
+	for kind := range bundle.referencedKinds() {
+		if outputs.listed[kind] {
+			continue
+		}
+		compute, ok := provider.(ComputeProvider)
+		if !ok {
+			return unsupportedKind(options.Provider, kind)
+		}
+		switch kind {
+		case "instance":
+			live, err := compute.ListInstances()
+			if err != nil {
+				return err
+			}
+			recordInstanceOutputs(options, live)
+		case "staticAddress":
+			live, err := compute.ListAddresses()
+			if err != nil {
+				return err
+			}
+			recordAddressOutputs(options, live)
+		}
+	}
+	return nil
+}
+
+// planBudgets plans budget creates and updates, returning the prune deletes
+// so Plan can append them after the host deletes.
+func planBudgets(provider LiveProvider, bundle *Bundle, options *Options, changes *[]Change) ([]Change, error) {
+	if !wanted(options, "budget") || len(bundle.Budgets) == 0 {
+		return nil, nil
+	}
+	monitoring, ok := provider.(MonitoringProvider)
+	if !ok {
+		return nil, unsupportedKind(options.Provider, "budget")
+	}
+	live, err := monitoring.ListBudgets()
+	if err != nil {
+		return nil, err
+	}
+	desired := map[string]bool{}
+	for _, item := range bundle.Budgets {
+		desired[item.Name] = true
+		current, found := findBudget(live, item.Name)
+		switch {
+		case !found:
+			*changes = append(*changes, change("budget", ActionCreate, "budget|"+item.Name, "missing", Target{Kind: TargetBudget, Budget: item}))
+		case !sameAmount(current.Amount, item.Amount) || current.Currency != item.Currency || !stringsEqual(alertKeys(current.Alerts), alertKeys(item.Alerts)):
+			c := change("budget", ActionUpdate, "budget|"+item.Name, "amount or alerts differ", Target{Kind: TargetBudget, Budget: item})
+			c.Diffs = budgetDiffs(current, item)
+			*changes = append(*changes, c)
+		}
+	}
+	var deletes []Change
+	if options.PruneMonitoring {
+		for _, item := range live {
+			if !desired[item.Name] {
+				deletes = append(deletes, change("budget", ActionDelete, "budget|"+item.Name, "absent from specs", Target{Kind: TargetBudget, Budget: item}))
+			}
+		}
+	}
+	return deletes, nil
+}
+
+// planHealthChecks plans health check creates, updates, replaces, and prune
+// deletes, resolving each target through the run's outputs.
+func planHealthChecks(provider LiveProvider, bundle *Bundle, options *Options, changes *[]Change) error {
+	if !wanted(options, "healthCheck") || len(bundle.HealthChecks) == 0 {
+		return nil
+	}
+	monitoring, ok := provider.(MonitoringProvider)
+	if !ok {
+		return unsupportedKind(options.Provider, "healthCheck")
+	}
+	live, err := monitoring.ListHealthChecks()
+	if err != nil {
+		return err
+	}
+	desired := map[string]bool{}
+	for _, item := range bundle.HealthChecks {
+		desired[item.Name] = true
+		resolved := item
+		targets, pending := options.outputs().Resolve([]string{item.Target})
+		resolved.Target = targets[0]
+		current, found := findHealthCheck(live, item.Name)
+		switch {
+		case !found && len(pending) > 0:
+			*changes = append(*changes, change("healthCheck", ActionCreate, "healthCheck|"+item.Name, pendingSummary(pending), Target{Kind: TargetHealthCheck, HealthCheck: item}))
+		case !found:
+			*changes = append(*changes, change("healthCheck", ActionCreate, "healthCheck|"+item.Name, "missing", Target{Kind: TargetHealthCheck, HealthCheck: resolved}))
+		case current.Protocol != item.Protocol || current.Interval != item.Interval:
+			var immutable []string
+			if current.Protocol != item.Protocol {
+				immutable = append(immutable, "protocol")
+			}
+			if current.Interval != item.Interval {
+				immutable = append(immutable, "interval")
+			}
+			*changes = append(*changes, change("healthCheck", ActionReplace, "healthCheck|"+item.Name, strings.Join(immutable, ", ")+" is immutable", Target{Kind: TargetHealthCheck, HealthCheck: resolved}))
+		case len(pending) > 0:
+			updated := item
+			updated.ID = current.ID
+			c := change("healthCheck", ActionUpdate, "healthCheck|"+item.Name, pendingSummary(pending), Target{Kind: TargetHealthCheck, HealthCheck: updated})
+			c.Diffs = healthCheckDiffs(current, resolved)
+			*changes = append(*changes, c)
+		case current.Target != resolved.Target || current.Port != item.Port || current.Path != item.Path || current.Host != item.Host ||
+			current.FailureThreshold != item.FailureThreshold || !stringsEqual(normalized(current.Emails), normalized(item.Emails)) || !current.Alarm:
+			updated := resolved
+			updated.ID = current.ID
+			c := change("healthCheck", ActionUpdate, "healthCheck|"+item.Name, "target, probe, emails, or alarm differ", Target{Kind: TargetHealthCheck, HealthCheck: updated})
+			c.Diffs = healthCheckDiffs(current, resolved)
+			*changes = append(*changes, c)
+		}
+	}
+	if options.PruneMonitoring {
+		for _, item := range live {
+			if !desired[item.Name] {
+				*changes = append(*changes, change("healthCheck", ActionDelete, "healthCheck|"+item.Name, "absent from specs", Target{Kind: TargetHealthCheck, HealthCheck: item}))
+			}
+		}
+	}
+	return nil
+}
+
+func findBudget(items []Budget, name string) (Budget, bool) {
+	for _, item := range items {
+		if item.Name == name {
+			return item, true
+		}
+	}
+	return Budget{}, false
+}
+
+func findHealthCheck(items []HealthCheck, name string) (HealthCheck, bool) {
+	for _, item := range items {
+		if item.Name == name {
+			return item, true
+		}
+	}
+	return HealthCheck{}, false
+}
+
+func budgetDiffs(current, desired Budget) []FieldDiff {
+	var diffs []FieldDiff
+	if !sameAmount(current.Amount, desired.Amount) {
+		diffs = append(diffs, FieldDiff{Field: "amount", Old: current.Amount, New: desired.Amount})
+	}
+	if current.Currency != desired.Currency {
+		diffs = append(diffs, FieldDiff{Field: "currency", Old: current.Currency, New: desired.Currency})
+	}
+	return append(diffs, setDiffs("alert", alertKeys(current.Alerts), alertKeys(desired.Alerts))...)
+}
+
+func healthCheckDiffs(current, desired HealthCheck) []FieldDiff {
+	var diffs []FieldDiff
+	scalar := func(field, before, after string) {
+		if before != after {
+			diffs = append(diffs, FieldDiff{Field: field, Old: before, New: after})
+		}
+	}
+	scalar("target", current.Target, desired.Target)
+	scalar("port", strconv.FormatInt(current.Port, 10), strconv.FormatInt(desired.Port, 10))
+	scalar("path", current.Path, desired.Path)
+	scalar("host", current.Host, desired.Host)
+	scalar("failureThreshold", strconv.FormatInt(current.FailureThreshold, 10), strconv.FormatInt(desired.FailureThreshold, 10))
+	if !current.Alarm && desired.Alarm {
+		diffs = append(diffs, FieldDiff{Field: "alarm", Old: "missing", New: "present"})
+	}
+	return append(diffs, setDiffs("email", current.Emails, desired.Emails)...)
 }

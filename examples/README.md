@@ -17,9 +17,11 @@ attune key rm -f && rm "$ATTUNE_STORE" && unset ATTUNE_STORE
 ```
 
 A second example, `aws/`, is a store for the `aws` provider: an `attune.yaml`
-with the `aws` block, one Route 53 record set, and one host declared as an IAM
-role, a bucket, a firewall, an instance, and a static address. Validate it the
-same way from inside `aws/`. Its live commands need the AWS CLI configured
+with the `aws` block, one Route 53 record set, one host declared as an IAM
+role, a bucket, a firewall, an instance, and a static address, a monthly cost
+budget, and an uptime check that emails on failure. Validate it the same way
+from inside `aws/`. A live `apply` of the check sends each listed address one
+confirmation email, which the recipient must accept before alarms reach it. Its live commands need the AWS CLI configured
 (`aws configure`); the image parameter path, the TEST-NET source, and the
 `example-*` names are placeholders like the Azure example's.
 
