@@ -61,6 +61,7 @@ type AwsProvider struct {
 	account   Account
 	zoneIDs   map[string]string
 	reference func() string
+	sleep     func(time.Duration)
 	hostState *awsHostState
 }
 
@@ -106,6 +107,7 @@ func NewAwsProvider(cli AwsCli, region, profile string) *AwsProvider {
 		profile:   profile,
 		zoneIDs:   map[string]string{},
 		reference: func() string { return "attune-" + strconv.FormatInt(time.Now().UnixNano(), 10) },
+		sleep:     time.Sleep,
 	}
 }
 
@@ -358,7 +360,10 @@ func fromRoute53Value(recordType, value string) string {
 // Host kinds. Every resource attune creates carries the tag attune=managed
 // (IAM roles and instance profiles also live under the path /attune/), and
 // every list reads only those resources, so pruning can never reach a
-// resource attune did not create.
+// resource attune did not create. Each family is found where it lives: IAM
+// roles by path, buckets and health checks by listing them and reading
+// their tags, and EC2 resources through the tagging API in the configured
+// region, which only knows regional resources.
 
 const (
 	awsManagedTagKey   = "attune"
@@ -372,12 +377,12 @@ const awsEC2TrustPolicy = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow
 func init() {
 	for _, pair := range []string{
 		"resourcegroupstaggingapi get-resources",
-		"iam create-role", "iam delete-role",
+		"iam list-roles", "iam create-role", "iam delete-role",
 		"iam list-attached-role-policies", "iam attach-role-policy", "iam detach-role-policy",
 		"iam list-role-policies", "iam get-role-policy", "iam put-role-policy", "iam delete-role-policy",
 		"iam list-instance-profiles-for-role", "iam create-instance-profile", "iam delete-instance-profile",
 		"iam add-role-to-instance-profile", "iam remove-role-from-instance-profile",
-		"s3api create-bucket", "s3api delete-bucket", "s3api put-bucket-tagging",
+		"s3api list-buckets", "s3api get-bucket-tagging", "s3api create-bucket", "s3api delete-bucket", "s3api put-bucket-tagging",
 		"s3api get-bucket-location", "s3api get-public-access-block", "s3api put-public-access-block",
 		"s3api get-bucket-encryption", "s3api put-bucket-encryption",
 		"ec2 describe-vpcs", "ec2 describe-security-groups", "ec2 create-security-group", "ec2 delete-security-group",
@@ -390,7 +395,7 @@ func init() {
 		"ssm get-parameter",
 		"budgets describe-budgets", "budgets list-tags-for-resource", "budgets describe-notifications-for-budget", "budgets describe-subscribers-for-notification",
 		"budgets create-budget", "budgets update-budget", "budgets create-notification", "budgets delete-notification", "budgets delete-budget",
-		"route53 create-health-check", "route53 change-tags-for-resource", "route53 get-health-check", "route53 update-health-check", "route53 delete-health-check", "route53 list-tags-for-resource",
+		"route53 create-health-check", "route53 change-tags-for-resource", "route53 list-health-checks", "route53 list-tags-for-resources", "route53 update-health-check", "route53 delete-health-check",
 		"sns create-topic", "sns list-topics", "sns list-subscriptions-by-topic", "sns subscribe", "sns unsubscribe", "sns delete-topic",
 		"cloudwatch put-metric-alarm", "cloudwatch describe-alarms", "cloudwatch delete-alarms",
 	} {
@@ -415,6 +420,8 @@ var (
 type awsHostState struct {
 	loaded      bool
 	arns        map[string][]string // resource type -> ARNs
+	roles       []string            // role names under /attune/, nil until listed
+	buckets     map[string]bool     // bucket name -> carries the managed tag, nil until listed
 	firewallIDs map[string]string   // firewall name -> group id
 	instanceIDs map[string]string   // instance name -> instance id
 	groupNames  map[string]string   // group id -> firewall name
@@ -441,7 +448,7 @@ func (p *AwsProvider) managedARNs(resourceType string) ([]string, error) {
 		}
 		err := p.run("resourcegroupstaggingapi", "get-resources", &result,
 			"--tag-filters", `[{"Key":"`+awsManagedTagKey+`","Values":["`+awsManagedTagValue+`"]}]`,
-			"--resource-type-filters", "iam:role", "s3", "ec2:instance", "ec2:security-group", "ec2:elastic-ip", "route53:healthcheck")
+			"--resource-type-filters", "ec2:instance", "ec2:security-group", "ec2:elastic-ip")
 		if err != nil {
 			return nil, err
 		}
@@ -508,16 +515,40 @@ func sortedKeys(m map[string]string) []string {
 
 // ---- IAM roles
 
+// managedRoleNames lists the roles under the attune path, once per run.
+// IAM is global, so this never depends on the configured region.
+func (p *AwsProvider) managedRoleNames() ([]string, error) {
+	h := p.host()
+	if h.roles == nil {
+		var result struct {
+			Roles []struct {
+				Name string `json:"RoleName"`
+				Path string `json:"Path"`
+			} `json:"Roles"`
+		}
+		if err := p.run("iam", "list-roles", &result, "--path-prefix", awsIamPath); err != nil {
+			return nil, err
+		}
+		h.roles = []string{}
+		for _, r := range result.Roles {
+			if r.Path == awsIamPath {
+				h.roles = append(h.roles, r.Name)
+			}
+		}
+	}
+	return h.roles, nil
+}
+
 // ListIamRoles returns every role attune created, with its policies and
 // whether it has an instance profile.
 func (p *AwsProvider) ListIamRoles() ([]IamRole, error) {
-	arns, err := p.managedARNs("iam:role")
+	names, err := p.managedRoleNames()
 	if err != nil {
 		return nil, err
 	}
 	var roles []IamRole
-	for _, arn := range arns {
-		role, err := p.readIamRole(arnName(arn))
+	for _, name := range names {
+		role, err := p.readIamRole(name)
 		if err != nil {
 			return nil, err
 		}
@@ -592,6 +623,7 @@ func (p *AwsProvider) PutIamRole(role IamRole) error {
 			"--assume-role-policy-document", awsEC2TrustPolicy, "--tags", awsTagsJSON("")); err != nil {
 			return err
 		}
+		p.host().roles = append(p.host().roles, role.Name)
 	}
 	for _, arn := range role.ManagedPolicies {
 		if !slices.Contains(current.ManagedPolicies, arn) {
@@ -635,15 +667,13 @@ func (p *AwsProvider) PutIamRole(role IamRole) error {
 
 // currentIamRole returns the live role when attune owns one by that name.
 func (p *AwsProvider) currentIamRole(name string) (IamRole, bool, error) {
-	arns, err := p.managedARNs("iam:role")
+	names, err := p.managedRoleNames()
 	if err != nil {
 		return IamRole{}, false, err
 	}
-	for _, arn := range arns {
-		if arnName(arn) == name {
-			role, err := p.readIamRole(name)
-			return role, true, err
-		}
+	if slices.Contains(names, name) {
+		role, err := p.readIamRole(name)
+		return role, true, err
 	}
 	return IamRole{InlinePolicies: map[string]any{}}, false, nil
 }
@@ -694,16 +724,53 @@ func sortedAnyKeys(m map[string]any) []string {
 
 // ---- Buckets
 
-// ListBuckets returns every bucket attune created, with its region, public
-// access block, and default encryption.
+// bucketNames lists every bucket in the account once per run and records
+// which carry the managed tag. A bucket whose tags cannot be read counts as
+// not managed, so pruning never reaches it.
+func (p *AwsProvider) bucketNames() (map[string]bool, error) {
+	h := p.host()
+	if h.buckets == nil {
+		var result struct {
+			Buckets []struct {
+				Name string `json:"Name"`
+			} `json:"Buckets"`
+		}
+		if err := p.run("s3api", "list-buckets", &result); err != nil {
+			return nil, err
+		}
+		h.buckets = map[string]bool{}
+		for _, b := range result.Buckets {
+			var tags struct {
+				TagSet []struct {
+					Key   string `json:"Key"`
+					Value string `json:"Value"`
+				} `json:"TagSet"`
+			}
+			managed := false
+			if err := p.run("s3api", "get-bucket-tagging", &tags, "--bucket", b.Name); err == nil {
+				for _, t := range tags.TagSet {
+					managed = managed || (t.Key == awsManagedTagKey && t.Value == awsManagedTagValue)
+				}
+			}
+			h.buckets[b.Name] = managed
+		}
+	}
+	return h.buckets, nil
+}
+
+// ListBuckets returns every bucket attune created, in any region, with its
+// region, public access block, and default encryption.
 func (p *AwsProvider) ListBuckets() ([]Bucket, error) {
-	arns, err := p.managedARNs("s3")
+	names, err := p.bucketNames()
 	if err != nil {
 		return nil, err
 	}
 	var buckets []Bucket
-	for _, arn := range arns {
-		bucket, err := p.readBucket(arnName(arn))
+	for _, name := range sortedBoolKeys(names) {
+		if !names[name] {
+			continue
+		}
+		bucket, err := p.readBucket(name)
 		if err != nil {
 			return nil, err
 		}
@@ -756,17 +823,15 @@ func (p *AwsProvider) readBucket(name string) (Bucket, error) {
 	return bucket, nil
 }
 
-// PutBucket creates the bucket when attune does not own one by that name,
-// then sets its public access block and default encryption.
+// PutBucket creates the bucket when the account has none by that name,
+// adopts an existing one by tagging it, then sets its public access block
+// and default encryption.
 func (p *AwsProvider) PutBucket(bucket Bucket) error {
-	arns, err := p.managedARNs("s3")
+	names, err := p.bucketNames()
 	if err != nil {
 		return err
 	}
-	exists := false
-	for _, arn := range arns {
-		exists = exists || arnName(arn) == bucket.Name
-	}
+	managed, exists := names[bucket.Name]
 	if !exists {
 		args := []string{"--bucket", bucket.Name, "--region", bucket.Region}
 		if bucket.Region != "us-east-1" {
@@ -775,9 +840,12 @@ func (p *AwsProvider) PutBucket(bucket Bucket) error {
 		if err := p.run("s3api", "create-bucket", nil, args...); err != nil {
 			return err
 		}
+	}
+	if !managed {
 		if err := p.run("s3api", "put-bucket-tagging", nil, "--bucket", bucket.Name, "--tagging", `{"TagSet":`+awsTagsJSON("")+`}`); err != nil {
 			return err
 		}
+		names[bucket.Name] = true
 	}
 	pab, _ := json.Marshal(bucket.PublicAccessBlock)
 	if err := p.run("s3api", "put-public-access-block", nil, "--bucket", bucket.Name, "--public-access-block-configuration", string(pab)); err != nil {
@@ -1284,7 +1352,7 @@ func (p *AwsProvider) PutInstance(instance Instance) (string, error) {
 		var launched struct {
 			Instances []awsInstance `json:"Instances"`
 		}
-		if err := p.run("ec2", "run-instances", &launched, args...); err != nil {
+		if err := p.runInstancesWithRetry(&launched, args); err != nil {
 			return "", err
 		}
 		if len(launched.Instances) != 1 {
@@ -1709,42 +1777,70 @@ func (p *AwsProvider) topicARN(check string) (string, error) {
 	return h.topics[awsTopicName(check)], nil
 }
 
+type awsTag struct {
+	Key   string `json:"Key"`
+	Value string `json:"Value"`
+}
+
+// healthCheckTags reads the tags of every listed health check, ten ids per
+// call as the API allows, keyed by check id.
+func (p *AwsProvider) healthCheckTags(ids []string) (map[string][]awsTag, error) {
+	tags := map[string][]awsTag{}
+	for start := 0; start < len(ids); start += 10 {
+		batch := ids[start:min(start+10, len(ids))]
+		var result struct {
+			ResourceTagSets []struct {
+				ResourceID string   `json:"ResourceId"`
+				Tags       []awsTag `json:"Tags"`
+			} `json:"ResourceTagSets"`
+		}
+		if err := p.run("route53", "list-tags-for-resources", &result, append([]string{"--resource-type", "healthcheck", "--resource-ids"}, batch...)...); err != nil {
+			return nil, err
+		}
+		for _, set := range result.ResourceTagSets {
+			tags[set.ResourceID] = set.Tags
+		}
+	}
+	return tags, nil
+}
+
 // ListHealthChecks returns every health check attune created, with its
-// probe, its email subscriptions, and whether its alarm exists.
+// probe, its email subscriptions, and whether its alarm exists. Route 53 is
+// global, so the checks are listed directly rather than through the
+// regional tagging API.
 func (p *AwsProvider) ListHealthChecks() ([]HealthCheck, error) {
-	arns, err := p.managedARNs("route53:healthcheck")
+	var listed struct {
+		HealthChecks []struct {
+			ID     string               `json:"Id"`
+			Config awsHealthCheckConfig `json:"HealthCheckConfig"`
+		} `json:"HealthChecks"`
+	}
+	if err := p.run("route53", "list-health-checks", &listed); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(listed.HealthChecks))
+	for _, hc := range listed.HealthChecks {
+		ids = append(ids, hc.ID)
+	}
+	tags, err := p.healthCheckTags(ids)
 	if err != nil {
 		return nil, err
 	}
 	var checks []HealthCheck
-	for _, arn := range arns {
-		id := arnName(arn)
-		var result struct {
-			HealthCheck struct {
-				Config awsHealthCheckConfig `json:"HealthCheckConfig"`
-			} `json:"HealthCheck"`
-		}
-		if err := p.run("route53", "get-health-check", &result, "--health-check-id", id); err != nil {
-			return nil, err
-		}
-		var tags struct {
-			ResourceTagSet struct {
-				Tags []struct {
-					Key   string `json:"Key"`
-					Value string `json:"Value"`
-				} `json:"Tags"`
-			} `json:"ResourceTagSet"`
-		}
-		if err := p.run("route53", "list-tags-for-resource", &tags, "--resource-type", "healthcheck", "--resource-id", id); err != nil {
-			return nil, err
-		}
-		cfg := result.HealthCheck.Config
-		check := HealthCheck{ID: id, Protocol: cfg.Type, Port: cfg.Port, Path: cfg.ResourcePath, Interval: cfg.RequestInterval, FailureThreshold: cfg.FailureThreshold}
-		for _, t := range tags.ResourceTagSet.Tags {
+	for _, hc := range listed.HealthChecks {
+		managed := false
+		check := HealthCheck{ID: hc.ID}
+		for _, t := range tags[hc.ID] {
+			managed = managed || (t.Key == awsManagedTagKey && t.Value == awsManagedTagValue)
 			if t.Key == "Name" {
 				check.Name = t.Value
 			}
 		}
+		if !managed {
+			continue
+		}
+		cfg := hc.Config
+		check.Protocol, check.Port, check.Path, check.Interval, check.FailureThreshold = cfg.Type, cfg.Port, cfg.ResourcePath, cfg.RequestInterval, cfg.FailureThreshold
 		if cfg.IPAddress != "" {
 			check.Target, check.Host = cfg.IPAddress, cfg.FQDN
 		} else {
@@ -1894,4 +1990,36 @@ func (p *AwsProvider) DeleteHealthCheck(check HealthCheck) error {
 		}
 	}
 	return p.run("route53", "delete-health-check", nil, "--health-check-id", check.ID)
+}
+
+// awsLaunchRetries and awsLaunchRetryDelay bound the retry of run-instances
+// while IAM propagates a freshly created instance profile.
+const (
+	awsLaunchRetries    = 6
+	awsLaunchRetryDelay = 5 * time.Second
+)
+
+// runInstancesWithRetry launches an instance, retrying a failed launch a
+// few times over about thirty seconds, since a profile created moments ago
+// is not yet visible to EC2. The last failure is reported as any other.
+func (p *AwsProvider) runInstancesWithRetry(out any, args []string) error {
+	var err error
+	for attempt := 0; attempt <= awsLaunchRetries; attempt++ {
+		if attempt > 0 {
+			p.sleep(awsLaunchRetryDelay)
+		}
+		if err = p.run("ec2", "run-instances", out, args...); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+func sortedBoolKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

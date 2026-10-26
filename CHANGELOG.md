@@ -3,6 +3,7 @@
 | Version | Summary |
 |---------|---------|
 | Unreleased | |
+| 1.10.1 | AC9: attune v1.10.1 finds AWS resources by family and retries a racing launch |
 | 1.10.0 | AC7+AC8: attune v1.10.0 adds spec references, a budget, and an uptime check |
 | 1.9.0 | AC5+AC6: attune v1.9.0 adds an aws provider: Route 53 and host kinds |
 | 1.8.0 | AC4: attune v1.8.0 lets each spec name its cloud provider |

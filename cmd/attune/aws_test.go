@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/queone/gkit/color"
 )
@@ -300,11 +302,13 @@ func awsHostBundle() *Bundle {
 const (
 	awsEmptyTaggingJSON = `{"ResourceTagMappingList":[]}`
 	awsFullTaggingJSON  = `{"ResourceTagMappingList":[
-		{"ResourceARN":"arn:aws:iam::111111111111:role/attune/example-host"},
-		{"ResourceARN":"arn:aws:s3:::example-attune-backups"},
+		{"ResourceARN":"arn:aws:iam::111111111111:instance-profile/attune/example-host"},
 		{"ResourceARN":"arn:aws:ec2:us-east-1:111111111111:security-group/sg-0live"},
 		{"ResourceARN":"arn:aws:ec2:us-east-1:111111111111:instance/i-0live"},
 		{"ResourceARN":"arn:aws:ec2:us-east-1:111111111111:elastic-ip/eipalloc-0live"}]}`
+	awsRoleListJSON      = `{"Roles":[{"RoleName":"example-host","Path":"/attune/","Arn":"arn:aws:iam::111111111111:role/attune/example-host"},{"RoleName":"other","Path":"/","Arn":"arn:aws:iam::111111111111:role/other"}]}`
+	awsBucketListJSON    = `{"Buckets":[{"Name":"example-attune-backups"}]}`
+	awsBucketTagsJSON    = `{"TagSet":[{"Key":"attune","Value":"managed"}]}`
 	awsSecurityGroupJSON = `{"SecurityGroups":[{"GroupId":"sg-0live","GroupName":"example-host","VpcId":"vpc-0default","IpPermissions":[
 		{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":"192.0.2.0/24"}]},
 		{"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]}]}`
@@ -323,6 +327,9 @@ func awsInstanceJSON(image, project string) string {
 func awsFullAccount(groups, instances string) map[string][]fakeAwsResult {
 	return map[string][]fakeAwsResult{
 		"resourcegroupstaggingapi get-resources": {{out: awsFullTaggingJSON}},
+		"iam list-roles":                         {{out: awsRoleListJSON}},
+		"s3api list-buckets":                     {{out: awsBucketListJSON}},
+		"s3api get-bucket-tagging":               {{out: awsBucketTagsJSON}},
 		"iam list-attached-role-policies":        {{out: `{"AttachedPolicies":[{"PolicyArn":"arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"}]}`}},
 		"iam list-role-policies":                 {{out: `{"PolicyNames":["backup"]}`}},
 		"iam get-role-policy":                    {{out: `{"PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::example-attune-backups/*"}]}}`}},
@@ -364,6 +371,8 @@ func changeKeys(changes []Change) []string {
 func TestAwsCreatesHostInDependencyOrder(t *testing.T) {
 	provider, cli := newAwsFake(map[string][]fakeAwsResult{
 		"resourcegroupstaggingapi get-resources": {{out: awsEmptyTaggingJSON}},
+		"iam list-roles":                         {{out: `{"Roles":[]}`}},
+		"s3api list-buckets":                     {{out: `{"Buckets":[]}`}},
 		"ssm get-parameter":                      {{out: `{"Parameter":{"Value":"ami-0example"}}`}},
 		"route53 list-hosted-zones-by-name":      {{out: awsNoZoneJSON}},
 		"route53 create-hosted-zone":             {{out: awsCreateZone}},
@@ -403,7 +412,7 @@ func TestAwsCreatesHostInDependencyOrder(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	wantPairs := []string{
-		"resourcegroupstaggingapi get-resources", "ssm get-parameter", "route53 list-hosted-zones-by-name",
+		"iam list-roles", "s3api list-buckets", "resourcegroupstaggingapi get-resources", "ssm get-parameter", "route53 list-hosted-zones-by-name",
 		"iam create-role", "iam attach-role-policy", "iam put-role-policy", "iam create-instance-profile", "iam add-role-to-instance-profile",
 		"s3api create-bucket", "s3api put-bucket-tagging", "s3api put-public-access-block", "s3api put-bucket-encryption",
 		"ec2 describe-vpcs", "ec2 create-security-group", "ec2 authorize-security-group-ingress",
@@ -577,6 +586,8 @@ func awsFullAccountWithZone(ip string) map[string][]fakeAwsResult {
 func TestAwsReferenceResolvesAfterTheAddressIsCreated(t *testing.T) {
 	provider, cli := newAwsFake(map[string][]fakeAwsResult{
 		"resourcegroupstaggingapi get-resources": {{out: awsEmptyTaggingJSON}},
+		"iam list-roles":                         {{out: `{"Roles":[]}`}},
+		"s3api list-buckets":                     {{out: `{"Buckets":[]}`}},
 		"ssm get-parameter":                      {{out: `{"Parameter":{"Value":"ami-0example"}}`}},
 		"route53 list-hosted-zones-by-name":      {{out: awsZoneListJSON}},
 		"route53 list-resource-record-sets":      {{out: `{"ResourceRecordSets":[]}`}},
@@ -682,31 +693,28 @@ func awsMonitoringBundle() *Bundle {
 }
 
 const (
-	awsTopicARN          = "arn:aws:sns:us-east-1:111111111111:attune-example-site"
-	awsMonitoringTagging = `{"ResourceTagMappingList":[
-		{"ResourceARN":"arn:aws:iam::111111111111:role/attune/example-host"},
-		{"ResourceARN":"arn:aws:s3:::example-attune-backups"},
-		{"ResourceARN":"arn:aws:ec2:us-east-1:111111111111:security-group/sg-0live"},
-		{"ResourceARN":"arn:aws:ec2:us-east-1:111111111111:instance/i-0live"},
-		{"ResourceARN":"arn:aws:ec2:us-east-1:111111111111:elastic-ip/eipalloc-0live"},
-		{"ResourceARN":"arn:aws:route53:::healthcheck/hc-live"}]}`
+	awsTopicARN            = "arn:aws:sns:us-east-1:111111111111:attune-example-site"
 	awsBudgetNotifications = `{"Notifications":[{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":80.0,"ThresholdType":"PERCENTAGE"},{"NotificationType":"FORECASTED","ComparisonOperator":"GREATER_THAN","Threshold":100.0,"ThresholdType":"PERCENTAGE"}]}`
 )
 
+const awsHealthCheckTagsJSON = `{"ResourceTagSets":[
+	{"ResourceType":"healthcheck","ResourceId":"hc-live","Tags":[{"Key":"attune","Value":"managed"},{"Key":"Name","Value":"example-site"}]},
+	{"ResourceType":"healthcheck","ResourceId":"hc-other","Tags":[{"Key":"Name","Value":"other"}]}]}`
+
 func awsHealthCheckJSON(protocol string, threshold int) string {
-	return `{"HealthCheck":{"Id":"hc-live","HealthCheckConfig":{"IPAddress":"203.0.113.10","Port":443,"Type":"` + protocol + `","ResourcePath":"/","FullyQualifiedDomainName":"example.com","RequestInterval":30,"FailureThreshold":` + string(rune('0'+threshold)) + `}}}`
+	return `{"HealthChecks":[{"Id":"hc-live","HealthCheckConfig":{"IPAddress":"203.0.113.10","Port":443,"Type":"` + protocol + `","ResourcePath":"/","FullyQualifiedDomainName":"example.com","RequestInterval":30,"FailureThreshold":` + string(rune('0'+threshold)) + `}},
+		{"Id":"hc-other","HealthCheckConfig":{"IPAddress":"203.0.113.11","Port":80,"Type":"HTTP","ResourcePath":"/","RequestInterval":30,"FailureThreshold":3}}]}`
 }
 
 func awsFullAccountWithMonitoring(notifications, healthCheck string) map[string][]fakeAwsResult {
 	recorded := awsFullAccountWithZone("203.0.113.10")
-	recorded["resourcegroupstaggingapi get-resources"] = []fakeAwsResult{{out: awsMonitoringTagging}}
 	recorded["sts get-caller-identity"] = []fakeAwsResult{{out: awsIdentityJSON}}
 	recorded["budgets describe-budgets"] = []fakeAwsResult{{out: `{"Budgets":[{"BudgetName":"example-monthly","BudgetLimit":{"Amount":"15.0","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}]}`}}
 	recorded["budgets list-tags-for-resource"] = []fakeAwsResult{{out: `{"ResourceTags":[{"Key":"attune","Value":"managed"}]}`}}
 	recorded["budgets describe-notifications-for-budget"] = []fakeAwsResult{{out: notifications}}
 	recorded["budgets describe-subscribers-for-notification"] = []fakeAwsResult{{out: `{"Subscribers":[{"SubscriptionType":"EMAIL","Address":"ops@example.com"}]}`}}
-	recorded["route53 get-health-check"] = []fakeAwsResult{{out: healthCheck}}
-	recorded["route53 list-tags-for-resource"] = []fakeAwsResult{{out: `{"ResourceTagSet":{"Tags":[{"Key":"attune","Value":"managed"},{"Key":"Name","Value":"example-site"}]}}`}}
+	recorded["route53 list-health-checks"] = []fakeAwsResult{{out: healthCheck}}
+	recorded["route53 list-tags-for-resources"] = []fakeAwsResult{{out: awsHealthCheckTagsJSON}}
 	recorded["sns list-topics"] = []fakeAwsResult{{out: `{"Topics":[{"TopicArn":"` + awsTopicARN + `"}]}`}}
 	recorded["sns list-subscriptions-by-topic"] = []fakeAwsResult{{out: `{"Subscriptions":[{"Endpoint":"ops@example.com","Protocol":"email","SubscriptionArn":"` + awsTopicARN + `:1"}]}`}}
 	recorded["cloudwatch describe-alarms"] = []fakeAwsResult{{out: `{"MetricAlarms":[{"AlarmName":"attune-example-site"}]}`}}
@@ -736,6 +744,9 @@ func TestAwsCreatesBudgetAndHealthCheck(t *testing.T) {
 	recorded := map[string][]fakeAwsResult{
 		"sts get-caller-identity":                {{out: awsIdentityJSON}},
 		"resourcegroupstaggingapi get-resources": {{out: awsEmptyTaggingJSON}},
+		"iam list-roles":                         {{out: `{"Roles":[]}`}},
+		"s3api list-buckets":                     {{out: `{"Buckets":[]}`}},
+		"route53 list-health-checks":             {{out: `{"HealthChecks":[]}`}},
 		"budgets describe-budgets":               {{out: `{"Budgets":[]}`}},
 		"budgets create-budget":                  {{out: ``}},
 		"ssm get-parameter":                      {{out: `{"Parameter":{"Value":"ami-0example"}}`}},
@@ -945,5 +956,163 @@ func TestAwsPrunesMonitoringOnlyWhenAsked(t *testing.T) {
 	want := "cloudwatch delete-alarms;sns delete-topic;route53 delete-health-check;budgets delete-budget"
 	if strings.Join(mutations, ";") != want {
 		t.Errorf("mutations = %v\nwant %s", mutations, want)
+	}
+}
+
+// ---- Discovery per family
+
+// TestAwsFindsRoleByPathNotTaggingAPI — AT1: the tagging API reports the
+// instance profile and no role, yet the role is found under /attune/ and
+// never recreated; a role outside the path is never pruned.
+func TestAwsFindsRoleByPathNotTaggingAPI(t *testing.T) {
+	provider, cli := newAwsFake(awsFullAccount(awsSecurityGroupJSON, awsInstanceJSON("ami-0example", "example")))
+	changes, err := Plan(provider, awsHostBundle(), &Options{Provider: "aws", PruneHosts: true})
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("changes=%v err=%v", changeKeys(changes), err)
+	}
+	pairs := cli.pairs()
+	if !slices.Contains(pairs, "iam list-roles") || slices.Contains(pairs, "iam create-role") {
+		t.Errorf("calls = %v", pairs)
+	}
+	for _, call := range cli.calls {
+		if call[1] == "list-roles" && cli.argAfter(call, "--path-prefix") != "/attune/" {
+			t.Errorf("list-roles argv = %v", call)
+		}
+	}
+}
+
+// TestAwsFindsBucketsInAnyRegion — AT2: buckets come from list-buckets and
+// their tags, so a managed bucket in another region is found and planned,
+// while an untagged bucket and one whose tags cannot be read are never
+// listed or pruned.
+func TestAwsFindsBucketsInAnyRegion(t *testing.T) {
+	provider, cli := newAwsFake(map[string][]fakeAwsResult{
+		"s3api list-buckets":            {{out: `{"Buckets":[{"Name":"example-attune-backups"},{"Name":"plain-bucket"},{"Name":"broken-bucket"}]}`}},
+		"s3api get-bucket-tagging":      {{out: awsBucketTagsJSON}, {out: `{"TagSet":[{"Key":"owner","Value":"someone"}]}`}, {exit: 254}},
+		"s3api get-bucket-location":     {{out: `{"LocationConstraint":"eu-west-1"}`}},
+		"s3api get-public-access-block": {{out: `{"PublicAccessBlockConfiguration":{"BlockPublicAcls":true,"IgnorePublicAcls":true,"BlockPublicPolicy":true,"RestrictPublicBuckets":true}}`}},
+		"s3api get-bucket-encryption":   {{out: `{"ServerSideEncryptionConfiguration":{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}}`}},
+	})
+	provider.region = "us-east-2"
+	bundle := &Bundle{Buckets: awsHostBundle().Buckets}
+	changes, err := Plan(provider, bundle, &Options{Provider: "aws", PruneHosts: true})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if got := changeKeys(changes); strings.Join(got, ";") != "replace bucket|example-attune-backups" || changes[0].Summary != "region is immutable" {
+		t.Errorf("changes = %v (%q)", got, changes[0].Summary)
+	}
+	locations := 0
+	for _, call := range cli.calls {
+		if call[1] == "get-bucket-location" {
+			locations++
+		}
+	}
+	if locations != 1 {
+		t.Errorf("get-bucket-location called %d times, want once for the managed bucket only", locations)
+	}
+}
+
+// TestAwsFindsHealthChecksByListing — AT3: checks come from
+// list-health-checks and batched tags; an untagged check is invisible even
+// under -M, and twelve ids take two tag calls.
+func TestAwsFindsHealthChecksByListing(t *testing.T) {
+	provider, _ := newAwsFake(awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTPS", 3)))
+	grounded(t, provider)
+	changes, err := Plan(provider, awsMonitoringBundle(), &Options{Provider: "aws", PruneDNS: true, PruneMonitoring: true})
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("changes=%v err=%v", changeKeys(changes), err)
+	}
+	var many strings.Builder
+	many.WriteString(`{"HealthChecks":[`)
+	for i := 1; i <= 12; i++ {
+		if i > 1 {
+			many.WriteString(",")
+		}
+		many.WriteString(`{"Id":"hc-` + strconv.Itoa(i) + `","HealthCheckConfig":{"IPAddress":"203.0.113.1","Port":80,"Type":"HTTP","ResourcePath":"/","RequestInterval":30,"FailureThreshold":3}}`)
+	}
+	many.WriteString(`]}`)
+	provider, cli := newAwsFake(map[string][]fakeAwsResult{
+		"route53 list-health-checks":      {{out: many.String()}},
+		"route53 list-tags-for-resources": {{out: `{"ResourceTagSets":[]}`}},
+	})
+	checks, err := provider.ListHealthChecks()
+	if err != nil || len(checks) != 0 {
+		t.Fatalf("checks=%v err=%v", checks, err)
+	}
+	tagCalls := 0
+	for _, call := range cli.calls {
+		if call[1] == "list-tags-for-resources" {
+			tagCalls++
+			ids := call[slices.Index(call, "--resource-ids")+1 : slices.Index(call, "--output")]
+			if len(ids) > 10 || len(ids) < 2 {
+				t.Errorf("batch of %d ids: %v", len(ids), call)
+			}
+		}
+	}
+	if tagCalls != 2 {
+		t.Errorf("list-tags-for-resources called %d times, want 2", tagCalls)
+	}
+}
+
+// TestAwsAllowlistMatchesDiscovery — AT4: the retired pairs are refused,
+// the new ones allowed, and the tagging API is asked only about EC2.
+func TestAwsAllowlistMatchesDiscovery(t *testing.T) {
+	for _, pair := range []string{"route53 get-health-check", "route53 list-tags-for-resource"} {
+		if awsAllowedCommands[pair] {
+			t.Errorf("%s still allowlisted", pair)
+		}
+	}
+	for _, pair := range []string{"iam list-roles", "route53 list-health-checks", "route53 list-tags-for-resources", "s3api list-buckets", "s3api get-bucket-tagging"} {
+		if !awsAllowedCommands[pair] {
+			t.Errorf("%s not allowlisted", pair)
+		}
+	}
+	provider, cli := newAwsFake(map[string][]fakeAwsResult{"resourcegroupstaggingapi get-resources": {{out: awsEmptyTaggingJSON}}})
+	if _, err := provider.ListFirewalls(); err != nil {
+		t.Fatal(err)
+	}
+	call := cli.calls[0]
+	i := slices.Index(call, "--resource-type-filters")
+	if i < 0 || strings.Join(call[i+1:i+5], " ") != "ec2:instance ec2:security-group ec2:elastic-ip --output" {
+		t.Errorf("tagging argv = %v", call)
+	}
+}
+
+// TestAwsLaunchRetriesWhileProfilePropagates — AT5: a launch that fails
+// twice succeeds on the third try after two five-second sleeps; one that
+// keeps failing is reported after six retries and thirty seconds.
+func TestAwsLaunchRetriesWhileProfilePropagates(t *testing.T) {
+	newProvider := func(results []fakeAwsResult) (*AwsProvider, *fakeAwsCli, *[]time.Duration) {
+		provider, cli := newAwsFake(map[string][]fakeAwsResult{
+			"ec2 describe-images": {{out: `{"Images":[{"RootDeviceName":"/dev/xvda"}]}`}},
+			"ec2 run-instances":   results,
+		})
+		var sleeps []time.Duration
+		provider.sleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+		return provider, cli, &sleeps
+	}
+	instance := awsHostBundle().Instances[0]
+	instance.Image, instance.Firewall, instance.Role = "ami-0example", "", ""
+	provider, cli, sleeps := newProvider([]fakeAwsResult{{exit: 254}, {exit: 254}, {out: `{"Instances":[{"InstanceId":"i-0new"}]}`}})
+	_ = cli
+	id, err := provider.PutInstance(instance)
+	if err != nil || id != "i-0new" || len(*sleeps) != 2 || (*sleeps)[0] != 5*time.Second {
+		t.Errorf("id=%q err=%v sleeps=%v", id, err, *sleeps)
+	}
+	provider, cli, sleeps = newProvider([]fakeAwsResult{{exit: 254}})
+	_, err = provider.PutInstance(instance)
+	launches := 0
+	for _, call := range cli.calls {
+		if call[1] == "run-instances" {
+			launches++
+		}
+	}
+	var total time.Duration
+	for _, d := range *sleeps {
+		total += d
+	}
+	if err == nil || !strings.Contains(err.Error(), "aws ec2 run-instances failed with exit 254") || launches != 7 || total != 30*time.Second {
+		t.Errorf("err=%v launches=%d slept=%v", err, launches, total)
 	}
 }
