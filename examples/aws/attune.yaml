@@ -1,0 +1,10 @@
+# Replace every placeholder before a live command. The aws CLI's own
+# configuration supplies the credentials; attune keeps none.
+provider: aws
+# Optional declared spec content version, printed in validate and grounding output.
+content_version: v0.1.0
+aws:
+  region: us-east-1
+  profile: example
+prune:
+  dns: false

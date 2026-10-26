@@ -131,7 +131,26 @@ func TestProviderBlocksFollowTheRegistry(t *testing.T) {
 	if cfg.Subscription != "sub" || cfg.ResourceGroup != "rg" || cfg.ProviderBlocks["azure"]["subscription"] != "sub" {
 		t.Errorf("azure block: cfg=%+v", cfg)
 	}
-	if _, err := ParseConfig([]byte("provider: azure\naws:\n  region: x\n")); err == nil || !strings.Contains(err.Error(), `"aws"`) {
+	if _, err := ParseConfig([]byte("provider: azure\ngcp:\n  region: x\n")); err == nil || !strings.Contains(err.Error(), `"gcp"`) {
 		t.Errorf("still-unregistered block: %v", err)
+	}
+}
+
+// TestPruneHostsParsesFromConfig — AT6: prune.hosts parses, resolves, and
+// stays off when absent.
+func TestPruneHostsParsesFromConfig(t *testing.T) {
+	cfg, err := ParseConfig([]byte("provider: aws\nprune:\n  hosts: true\n"))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.PruneHosts == nil || !*cfg.PruneHosts || !Resolve(cfg, Overrides{}).PruneHosts {
+		t.Errorf("prune.hosts = %v", cfg.PruneHosts)
+	}
+	off := false
+	if Resolve(cfg, Overrides{PruneHosts: &off}).PruneHosts {
+		t.Error("flag false did not override config true")
+	}
+	if Resolve(&Config{}, Overrides{}).PruneHosts {
+		t.Error("PruneHosts on without config")
 	}
 }

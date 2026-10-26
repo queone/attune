@@ -528,3 +528,25 @@ func TestPlanRejectsKindTheProviderLacks(t *testing.T) {
 		t.Fatalf("Apply with an unsupported target: %v", applyErr)
 	}
 }
+
+// TestHostKindsNeedTheirCapabilities — a provider without compute, network,
+// storage, or IAM role capabilities fails by kind and never reaches apply.
+func TestHostKindsNeedTheirCapabilities(t *testing.T) {
+	provider := &dnsOnlyProvider{}
+	for kind, bundle := range map[string]*Bundle{
+		"iamRole":       {IamRoles: []IamRole{{Name: "r"}}},
+		"bucket":        {Buckets: []Bucket{{Name: "b"}}},
+		"firewall":      {Firewalls: []Firewall{{Name: "f"}}},
+		"instance":      {Instances: []Instance{{Name: "i"}}},
+		"staticAddress": {Addresses: []StaticAddress{{Name: "a"}}},
+	} {
+		_, err := Plan(provider, bundle, &Options{Provider: "dnsonly"})
+		if err == nil || err.Error() != `provider "dnsonly" does not support kind "`+kind+`"` {
+			t.Errorf("%s: %v", kind, err)
+		}
+	}
+	err := Apply(provider, []Change{{Kind: "bucket", Action: ActionCreate, Target: Target{Kind: TargetBucket}}}, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "lacks the storage capability") {
+		t.Errorf("Apply bucket: %v", err)
+	}
+}

@@ -1,0 +1,15 @@
+# Synthetic ingress rules in the default VPC, using a TEST-NET source.
+kind: firewall
+provider: aws
+name: example-host
+rules:
+  - protocol: tcp
+    fromPort: 22
+    toPort: 22
+    sources:
+      - 192.0.2.0/24
+  - protocol: tcp
+    fromPort: 443
+    toPort: 443
+    sources:
+      - 0.0.0.0/0

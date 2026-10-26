@@ -1,0 +1,15 @@
+# Synthetic Graviton instance from the current Amazon Linux image parameter.
+kind: instance
+provider: aws
+name: example-host
+type: t4g.small
+image: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+role: example-host
+firewall: example-host
+imdsv2Required: true
+rootDisk:
+  size: 20
+  type: gp3
+  encrypted: true
+tags:
+  project: example

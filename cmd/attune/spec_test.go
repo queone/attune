@@ -103,7 +103,7 @@ func TestSpecProviderFieldSelectsRegisteredProvider(t *testing.T) {
 		t.Fatalf("bundle.Dns = %+v, want one azure record", bundle.Dns)
 	}
 	_, err = loadSources([]specSource{{name: "dns.yaml", content: []byte("provider: nope\n" + dnsSpecYAML)}}, "azure")
-	if err == nil || err.Error() != `unknown provider "nope"; registered: azure` {
+	if err == nil || err.Error() != `unknown provider "nope"; registered: aws, azure` {
 		t.Fatalf("unknown provider: %v", err)
 	}
 }
@@ -162,5 +162,40 @@ func TestDuplicateKeysAreScopedPerProvider(t *testing.T) {
 	}, "azure")
 	if err == nil || !strings.Contains(err.Error(), "duplicate resource key") {
 		t.Errorf("same provider twice: %v", err)
+	}
+}
+
+// TestHostKindsValidateShapes — AT1: the host kinds parse with their
+// defaults and reject a missing type, a rule without fromPort, an unknown
+// encryption value, and a provider that lacks the kind.
+func TestHostKindsValidateShapes(t *testing.T) {
+	load := func(doc string) (*Bundle, error) {
+		return loadSources([]specSource{{name: "spec.yaml", content: []byte(doc)}}, "azure")
+	}
+	bundle, err := load("provider: aws\nkind: instance\nname: h\ntype: t4g.small\nimage: ami-0example\nrootDisk:\n  size: 20\n")
+	if err != nil {
+		t.Fatalf("instance: %v", err)
+	}
+	if i := bundle.Instances[0]; !i.Imdsv2Required || i.RootDisk.Type != "gp3" || !i.RootDisk.Encrypted {
+		t.Errorf("instance defaults = %+v", i)
+	}
+	bundle, err = load("provider: aws\nkind: bucket\nname: b\nregion: us-east-1\nencryption: aes256\n")
+	if err != nil || bundle.Buckets[0].PublicAccessBlock != (PublicAccessBlock{true, true, true, true}) {
+		t.Errorf("bucket defaults: %+v %v", bundle, err)
+	}
+	for name, doc := range map[string]string{
+		"instance without type":  "provider: aws\nkind: instance\nname: h\nimage: ami-0example\nrootDisk:\n  size: 20\n",
+		"rule without fromPort":  "provider: aws\nkind: firewall\nname: f\nrules:\n  - protocol: tcp\n    toPort: 22\n    sources: [192.0.2.0/24]\n",
+		"unknown encryption":     "provider: aws\nkind: bucket\nname: b\nregion: us-east-1\nencryption: rot13\n",
+		"instance without disk":  "provider: aws\nkind: instance\nname: h\ntype: t4g.small\nimage: ami-0example\n",
+		"address without target": "provider: aws\nkind: staticAddress\nname: a\n",
+	} {
+		if _, err := load(doc); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	_, err = load("provider: azure\nkind: instance\nname: h\ntype: t4g.small\nimage: ami-0example\nrootDisk:\n  size: 20\n")
+	if err == nil || err.Error() != `provider "azure" does not support kind "instance"` {
+		t.Errorf("instance under azure: %v", err)
 	}
 }

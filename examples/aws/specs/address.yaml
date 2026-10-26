@@ -1,0 +1,5 @@
+# Synthetic static address attached to the example host.
+kind: staticAddress
+provider: aws
+name: example-host
+instance: example-host

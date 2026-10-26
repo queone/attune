@@ -51,8 +51,48 @@ type ResourceGroupProvider interface {
 	DeleteResourceGroup(name string) error
 }
 
-// Provider is the union of every capability; a provider that supports every
-// kind implements it, a narrower provider implements only its capabilities.
+// IamRoleProvider is the capability a provider offers for iamRole specs.
+// Live roles are the ones the provider itself created.
+type IamRoleProvider interface {
+	ListIamRoles() ([]IamRole, error)
+	PutIamRole(role IamRole) error
+	DeleteIamRole(role IamRole) error
+}
+
+// StorageProvider is the capability a provider offers for bucket specs.
+// Live buckets are the ones the provider itself created.
+type StorageProvider interface {
+	ListBuckets() ([]Bucket, error)
+	PutBucket(bucket Bucket) error
+	DeleteBucket(bucket Bucket) error
+}
+
+// NetworkProvider is the capability a provider offers for firewall specs.
+// Live firewalls are the ones the provider itself created.
+type NetworkProvider interface {
+	ListFirewalls() ([]Firewall, error)
+	PutFirewall(firewall Firewall) error
+	DeleteFirewall(firewall Firewall) error
+}
+
+// ComputeProvider is the capability a provider offers for instance and
+// staticAddress specs. Live instances and addresses are the ones the
+// provider itself created. ResolveImage turns a parameter path into an
+// image id and returns an image id unchanged. PutAddress returns the public
+// address so apply can show it.
+type ComputeProvider interface {
+	ResolveImage(image string) (string, error)
+	ListInstances() ([]Instance, error)
+	PutInstance(instance Instance) error
+	DeleteInstance(instance Instance) error
+	ListAddresses() ([]StaticAddress, error)
+	PutAddress(address StaticAddress) (string, error)
+	DeleteAddress(address StaticAddress) error
+}
+
+// Provider is the union of the Azure-shaped capabilities: DNS, identity,
+// roles, and resource groups. A provider that supports every one of those
+// kinds implements it; a narrower provider implements only its capabilities.
 type Provider interface {
 	DNSProvider
 	IdentityProvider

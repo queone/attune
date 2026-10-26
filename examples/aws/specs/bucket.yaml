@@ -1,0 +1,6 @@
+# Synthetic private bucket with default encryption.
+kind: bucket
+provider: aws
+name: example-attune-backups
+region: us-east-1
+encryption: aes256

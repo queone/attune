@@ -1,0 +1,14 @@
+# Synthetic role for the example host: SSM access and one inline policy.
+kind: iamRole
+provider: aws
+name: example-host
+managedPolicies:
+  - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+inlinePolicies:
+  backup:
+    Version: "2012-10-17"
+    Statement:
+      - Effect: Allow
+        Action: s3:PutObject
+        Resource: arn:aws:s3:::example-attune-backups/*
+instanceProfile: true

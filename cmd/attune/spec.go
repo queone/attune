@@ -457,9 +457,218 @@ func loadSpecInto(bundle *Bundle, kind, provider string, m map[string]any) (stri
 		bundle.ResourceGroups = append(bundle.ResourceGroups, item)
 		return "resourceGroup|" + item.Name, nil
 
+	case "iamRole":
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "managedPolicies", "inlinePolicies", "instanceProfile"}, ""); err != nil {
+			return "", err
+		}
+		name, err := requiredString(m, "name")
+		if err != nil {
+			return "", err
+		}
+		managed, err := optionalStrings(m, "managedPolicies")
+		if err != nil {
+			return "", err
+		}
+		inline, err := optionalAnyMap(m, "inlinePolicies")
+		if err != nil {
+			return "", err
+		}
+		profile, err := optionalBool(m, "instanceProfile")
+		if err != nil {
+			return "", err
+		}
+		item := IamRole{Provider: provider, Name: name, ManagedPolicies: managed, InlinePolicies: inline, InstanceProfile: profile != nil && *profile}
+		bundle.IamRoles = append(bundle.IamRoles, item)
+		return "iamRole|" + item.Name, nil
+
+	case "bucket":
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "region", "publicAccessBlock", "encryption"}, ""); err != nil {
+			return "", err
+		}
+		name, err := requiredString(m, "name")
+		if err != nil {
+			return "", err
+		}
+		region, err := requiredString(m, "region")
+		if err != nil {
+			return "", err
+		}
+		encryption, err := requiredString(m, "encryption")
+		if err != nil {
+			return "", err
+		}
+		if encryption != "aes256" && !strings.HasPrefix(encryption, "arn:") {
+			return "", fmt.Errorf("bucket encryption must be aes256 or a key ARN, not %q", encryption)
+		}
+		block := PublicAccessBlock{BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true}
+		if raw, ok := m["publicAccessBlock"]; ok && raw != nil {
+			pm, err := mapping(raw, "publicAccessBlock")
+			if err != nil {
+				return "", err
+			}
+			if err := rejectUnknown(pm, []string{"blockPublicAcls", "ignorePublicAcls", "blockPublicPolicy", "restrictPublicBuckets"}, "publicAccessBlock"); err != nil {
+				return "", err
+			}
+			for key, target := range map[string]*bool{"blockPublicAcls": &block.BlockPublicAcls, "ignorePublicAcls": &block.IgnorePublicAcls, "blockPublicPolicy": &block.BlockPublicPolicy, "restrictPublicBuckets": &block.RestrictPublicBuckets} {
+				v, err := optionalBool(pm, key)
+				if err != nil {
+					return "", err
+				}
+				if v != nil {
+					*target = *v
+				}
+			}
+		}
+		item := Bucket{Provider: provider, Name: name, Region: region, PublicAccessBlock: block, Encryption: encryption}
+		bundle.Buckets = append(bundle.Buckets, item)
+		return "bucket|" + item.Name, nil
+
+	case "firewall":
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "vpc", "rules"}, ""); err != nil {
+			return "", err
+		}
+		name, err := requiredString(m, "name")
+		if err != nil {
+			return "", err
+		}
+		vpc, err := optionalString(m, "vpc")
+		if err != nil {
+			return "", err
+		}
+		rawRules, ok := m["rules"].([]any)
+		if !ok {
+			return "", fmt.Errorf("firewall rules must be a list")
+		}
+		var rules []FirewallRule
+		for i, raw := range rawRules {
+			rm, err := mapping(raw, fmt.Sprintf("rules[%d]", i))
+			if err != nil {
+				return "", err
+			}
+			if err := rejectUnknown(rm, []string{"protocol", "fromPort", "toPort", "sources"}, fmt.Sprintf("rules[%d]", i)); err != nil {
+				return "", err
+			}
+			protocol, err := requiredString(rm, "protocol")
+			if err != nil {
+				return "", err
+			}
+			from, err := requiredI64(rm, "fromPort")
+			if err != nil {
+				return "", err
+			}
+			to, err := requiredI64(rm, "toPort")
+			if err != nil {
+				return "", err
+			}
+			sources, err := requiredStrings(rm, "sources")
+			if err != nil {
+				return "", err
+			}
+			if len(sources) == 0 {
+				return "", fmt.Errorf("firewall rule sources must not be empty")
+			}
+			rules = append(rules, FirewallRule{Protocol: protocol, FromPort: from, ToPort: to, Sources: sources})
+		}
+		item := Firewall{Provider: provider, Name: name, VPC: vpc, Rules: rules}
+		bundle.Firewalls = append(bundle.Firewalls, item)
+		return "firewall|" + item.Name, nil
+
+	case "instance":
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "type", "image", "role", "firewall", "imdsv2Required", "rootDisk", "tags"}, ""); err != nil {
+			return "", err
+		}
+		name, err := requiredString(m, "name")
+		if err != nil {
+			return "", err
+		}
+		instanceType, err := requiredString(m, "type")
+		if err != nil {
+			return "", err
+		}
+		image, err := requiredString(m, "image")
+		if err != nil {
+			return "", err
+		}
+		role, err := optionalString(m, "role")
+		if err != nil {
+			return "", err
+		}
+		firewall, err := optionalString(m, "firewall")
+		if err != nil {
+			return "", err
+		}
+		imds, err := optionalBool(m, "imdsv2Required")
+		if err != nil {
+			return "", err
+		}
+		rawDisk, ok := m["rootDisk"]
+		if !ok || rawDisk == nil {
+			return "", fmt.Errorf("instance rootDisk is required")
+		}
+		dm, err := mapping(rawDisk, "rootDisk")
+		if err != nil {
+			return "", err
+		}
+		if err := rejectUnknown(dm, []string{"size", "type", "encrypted"}, "rootDisk"); err != nil {
+			return "", err
+		}
+		size, err := requiredI64(dm, "size")
+		if err != nil {
+			return "", err
+		}
+		diskType, err := optionalString(dm, "type")
+		if err != nil {
+			return "", err
+		}
+		if diskType == "" {
+			diskType = "gp3"
+		}
+		encrypted, err := optionalBool(dm, "encrypted")
+		if err != nil {
+			return "", err
+		}
+		tags, err := optionalStringMap(m, "tags")
+		if err != nil {
+			return "", err
+		}
+		item := Instance{
+			Provider: provider, Name: name, Type: instanceType, Image: image, Role: role, Firewall: firewall,
+			Imdsv2Required: imds == nil || *imds,
+			RootDisk:       RootDisk{Size: size, Type: diskType, Encrypted: encrypted == nil || *encrypted},
+			Tags:           tags,
+		}
+		bundle.Instances = append(bundle.Instances, item)
+		return "instance|" + item.Name, nil
+
+	case "staticAddress":
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "instance"}, ""); err != nil {
+			return "", err
+		}
+		name, err := requiredString(m, "name")
+		if err != nil {
+			return "", err
+		}
+		instance, err := requiredString(m, "instance")
+		if err != nil {
+			return "", err
+		}
+		item := StaticAddress{Provider: provider, Name: name, Instance: instance}
+		bundle.Addresses = append(bundle.Addresses, item)
+		return "staticAddress|" + item.Name, nil
+
 	default:
 		return "", fmt.Errorf("unknown kind %q", kind)
 	}
+}
+
+// optionalAnyMap reads an optional mapping whose values are kept as parsed,
+// for policy documents.
+func optionalAnyMap(m map[string]any, name string) (map[string]any, error) {
+	raw, ok := m[name]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	return mapping(raw, name)
 }
 
 func collectSpecPaths(directory string, paths *[]string) error {

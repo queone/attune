@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -14,6 +15,9 @@ const (
 	ActionCreate Action = iota
 	ActionUpdate
 	ActionDelete
+	// ActionReplace marks a change to an immutable field. Plan reports it
+	// and Apply refuses it; the Director removes and re-adds the spec.
+	ActionReplace
 )
 
 func (a Action) String() string {
@@ -24,6 +28,8 @@ func (a Action) String() string {
 		return "update"
 	case ActionDelete:
 		return "delete"
+	case ActionReplace:
+		return "replace"
 	default:
 		return "unknown"
 	}
@@ -40,6 +46,11 @@ const (
 	TargetRoleDefinition
 	TargetRoleAssignment
 	TargetResourceGroup
+	TargetIamRole
+	TargetBucket
+	TargetFirewall
+	TargetInstance
+	TargetAddress
 )
 
 // RoleAssignmentTarget carries a role-assignment change's resolved identity.
@@ -60,6 +71,11 @@ type Target struct {
 	RoleDefinition RoleDefinition
 	RoleAssignment RoleAssignmentTarget
 	ResourceGroup  ResourceGroup
+	IamRole        IamRole
+	Bucket         Bucket
+	Firewall       Firewall
+	Instance       Instance
+	Address        StaticAddress
 }
 
 // Change is one planned create/update/delete action. Diffs carries the
@@ -83,6 +99,7 @@ type Options struct {
 	PruneIdentities     bool
 	PruneRoles          bool
 	PruneResourceGroups bool
+	PruneHosts          bool
 }
 
 // LiveAssignment is a role assignment as read from the live provider.
@@ -202,9 +219,10 @@ func roleDefinitionDiffs(current, desired RoleDefinition, subscription string) [
 // Plan computes create/update/delete changes for bundle against provider's
 // live state, honoring options.Kind filtering and prune policy. Kinds are
 // always processed in this fixed order: resourceGroup, securityGroup,
-// appRegistration, roleDefinition, roleAssignment, dnsRecordSet. Each kind
-// family asserts its capability interface on provider and fails when the
-// provider lacks it.
+// appRegistration, roleDefinition, roleAssignment, then the host kinds
+// iamRole, bucket, firewall, instance, staticAddress with their prunes in
+// reverse, then dnsRecordSet. Each kind family asserts its capability
+// interface on provider and fails when the provider lacks it.
 func Plan(provider LiveProvider, bundle *Bundle, options *Options) ([]Change, error) {
 	var changes []Change
 
@@ -362,6 +380,10 @@ func Plan(provider LiveProvider, bundle *Bundle, options *Options) ([]Change, er
 		if err := planRoleAssignments(roles, bundle, options, &changes); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := planHost(provider, bundle, options, &changes); err != nil {
+		return nil, err
 	}
 
 	if wanted(options, "dnsRecordSet") && len(bundle.Dns) > 0 {
@@ -593,11 +615,16 @@ func dnsProtected(item DnsRecord) bool {
 
 // Apply performs every planned Change against provider, in order,
 // invoking report after each successful mutation when report is non-nil.
-// Plan only emits changes for kinds the provider supports, so a missing
+// A replace change is refused, since the field it names is immutable. Plan
+// only emits changes for kinds the provider supports, so a missing
 // capability here is a programming error reported by kind.
 func Apply(provider LiveProvider, changes []Change, subscription string, report func(Change)) error {
-	for _, c := range changes {
-		if err := applyChange(provider, c, subscription); err != nil {
+	for i := range changes {
+		c := changes[i]
+		if c.Action == ActionReplace {
+			return fmt.Errorf("replace %s %s: %s; remove the spec, apply, then add it back", c.Kind, c.Key, c.Summary)
+		}
+		if err := applyChange(provider, &c, subscription); err != nil {
 			return err
 		}
 		if report != nil {
@@ -608,11 +635,59 @@ func Apply(provider LiveProvider, changes []Change, subscription string, report 
 }
 
 // applyChange performs one Change through the capability its target needs.
-func applyChange(provider LiveProvider, c Change, subscription string) error {
+// It may amend the change's summary with a result worth showing, such as
+// the public address a staticAddress received.
+func applyChange(provider LiveProvider, c *Change, subscription string) error {
 	lacks := func(capability string) error {
 		return fmt.Errorf("apply %s: provider lacks the %s capability", c.Kind, capability)
 	}
 	switch c.Target.Kind {
+	case TargetIamRole:
+		roles, ok := provider.(IamRoleProvider)
+		if !ok {
+			return lacks("IAM role")
+		}
+		if c.Action == ActionDelete {
+			return roles.DeleteIamRole(c.Target.IamRole)
+		}
+		return roles.PutIamRole(c.Target.IamRole)
+	case TargetBucket:
+		storage, ok := provider.(StorageProvider)
+		if !ok {
+			return lacks("storage")
+		}
+		if c.Action == ActionDelete {
+			return storage.DeleteBucket(c.Target.Bucket)
+		}
+		return storage.PutBucket(c.Target.Bucket)
+	case TargetFirewall:
+		network, ok := provider.(NetworkProvider)
+		if !ok {
+			return lacks("network")
+		}
+		if c.Action == ActionDelete {
+			return network.DeleteFirewall(c.Target.Firewall)
+		}
+		return network.PutFirewall(c.Target.Firewall)
+	case TargetInstance, TargetAddress:
+		compute, ok := provider.(ComputeProvider)
+		if !ok {
+			return lacks("compute")
+		}
+		switch {
+		case c.Target.Kind == TargetInstance && c.Action == ActionDelete:
+			return compute.DeleteInstance(c.Target.Instance)
+		case c.Target.Kind == TargetInstance:
+			return compute.PutInstance(c.Target.Instance)
+		case c.Action == ActionDelete:
+			return compute.DeleteAddress(c.Target.Address)
+		default:
+			ip, err := compute.PutAddress(c.Target.Address)
+			if err == nil && ip != "" {
+				c.Summary = "address " + ip
+			}
+			return err
+		}
 	case TargetZone, TargetDns:
 		dns, ok := provider.(DNSProvider)
 		if !ok {
@@ -667,4 +742,335 @@ func applyChange(provider LiveProvider, c Change, subscription string) error {
 		return rgs.PutResourceGroup(c.Target.ResourceGroup)
 	}
 	return nil
+}
+
+// planHost plans the host kinds in dependency order, iamRole, bucket,
+// firewall, instance, staticAddress, and appends their prune deletes in
+// reverse order so an address goes before its instance and a role last.
+func planHost(provider LiveProvider, bundle *Bundle, options *Options, changes *[]Change) error {
+	var deletes [][]Change
+	collect := func(kindDeletes []Change) { deletes = append(deletes, kindDeletes) }
+
+	if wanted(options, "iamRole") && len(bundle.IamRoles) > 0 {
+		roles, ok := provider.(IamRoleProvider)
+		if !ok {
+			return unsupportedKind(options.Provider, "iamRole")
+		}
+		live, err := roles.ListIamRoles()
+		if err != nil {
+			return err
+		}
+		desired := map[string]bool{}
+		for _, item := range bundle.IamRoles {
+			desired[item.Name] = true
+			current, found := findIamRole(live, item.Name)
+			switch {
+			case !found:
+				*changes = append(*changes, change("iamRole", ActionCreate, "iamRole|"+item.Name, "missing", Target{Kind: TargetIamRole, IamRole: item}))
+			case !stringsEqual(normalized(current.ManagedPolicies), normalized(item.ManagedPolicies)) || !samePolicies(current.InlinePolicies, item.InlinePolicies) || current.InstanceProfile != item.InstanceProfile:
+				c := change("iamRole", ActionUpdate, "iamRole|"+item.Name, "policies or instance profile differ", Target{Kind: TargetIamRole, IamRole: item})
+				c.Diffs = iamRoleDiffs(current, item)
+				*changes = append(*changes, c)
+			}
+		}
+		var kindDeletes []Change
+		if options.PruneHosts {
+			for _, item := range live {
+				if !desired[item.Name] {
+					kindDeletes = append(kindDeletes, change("iamRole", ActionDelete, "iamRole|"+item.Name, "absent from specs", Target{Kind: TargetIamRole, IamRole: item}))
+				}
+			}
+		}
+		collect(kindDeletes)
+	}
+
+	if wanted(options, "bucket") && len(bundle.Buckets) > 0 {
+		storage, ok := provider.(StorageProvider)
+		if !ok {
+			return unsupportedKind(options.Provider, "bucket")
+		}
+		live, err := storage.ListBuckets()
+		if err != nil {
+			return err
+		}
+		desired := map[string]bool{}
+		for _, item := range bundle.Buckets {
+			desired[item.Name] = true
+			current, found := findBucket(live, item.Name)
+			switch {
+			case !found:
+				*changes = append(*changes, change("bucket", ActionCreate, "bucket|"+item.Name, "missing", Target{Kind: TargetBucket, Bucket: item}))
+			case !sameLocation(current.Region, item.Region):
+				*changes = append(*changes, change("bucket", ActionReplace, "bucket|"+item.Name, "region is immutable", Target{Kind: TargetBucket, Bucket: item}))
+			case current.PublicAccessBlock != item.PublicAccessBlock || current.Encryption != item.Encryption:
+				c := change("bucket", ActionUpdate, "bucket|"+item.Name, "public access block or encryption differ", Target{Kind: TargetBucket, Bucket: item})
+				c.Diffs = bucketDiffs(current, item)
+				*changes = append(*changes, c)
+			}
+		}
+		var kindDeletes []Change
+		if options.PruneHosts {
+			for _, item := range live {
+				if !desired[item.Name] {
+					kindDeletes = append(kindDeletes, change("bucket", ActionDelete, "bucket|"+item.Name, "absent from specs", Target{Kind: TargetBucket, Bucket: item}))
+				}
+			}
+		}
+		collect(kindDeletes)
+	}
+
+	if wanted(options, "firewall") && len(bundle.Firewalls) > 0 {
+		network, ok := provider.(NetworkProvider)
+		if !ok {
+			return unsupportedKind(options.Provider, "firewall")
+		}
+		live, err := network.ListFirewalls()
+		if err != nil {
+			return err
+		}
+		desired := map[string]bool{}
+		for _, item := range bundle.Firewalls {
+			desired[item.Name] = true
+			current, found := findFirewall(live, item.Name)
+			switch {
+			case !found:
+				*changes = append(*changes, change("firewall", ActionCreate, "firewall|"+item.Name, "missing", Target{Kind: TargetFirewall, Firewall: item}))
+			case current.VPC != item.VPC:
+				*changes = append(*changes, change("firewall", ActionReplace, "firewall|"+item.Name, "vpc is immutable", Target{Kind: TargetFirewall, Firewall: item}))
+			case !sameRules(current.Rules, item.Rules):
+				updated := item
+				updated.ID = current.ID
+				c := change("firewall", ActionUpdate, "firewall|"+item.Name, "rules differ", Target{Kind: TargetFirewall, Firewall: updated})
+				c.Diffs = firewallDiffs(current, item)
+				*changes = append(*changes, c)
+			}
+		}
+		var kindDeletes []Change
+		if options.PruneHosts {
+			for _, item := range live {
+				if !desired[item.Name] {
+					kindDeletes = append(kindDeletes, change("firewall", ActionDelete, "firewall|"+item.Name, "absent from specs", Target{Kind: TargetFirewall, Firewall: item}))
+				}
+			}
+		}
+		collect(kindDeletes)
+	}
+
+	if wanted(options, "instance") && len(bundle.Instances) > 0 {
+		compute, ok := provider.(ComputeProvider)
+		if !ok {
+			return unsupportedKind(options.Provider, "instance")
+		}
+		live, err := compute.ListInstances()
+		if err != nil {
+			return err
+		}
+		desired := map[string]bool{}
+		for _, item := range bundle.Instances {
+			desired[item.Name] = true
+			resolved := item
+			image, err := compute.ResolveImage(item.Image)
+			if err != nil {
+				return err
+			}
+			resolved.Image = image
+			current, found := findInstance(live, item.Name)
+			if !found {
+				*changes = append(*changes, change("instance", ActionCreate, "instance|"+item.Name, "missing", Target{Kind: TargetInstance, Instance: resolved}))
+				continue
+			}
+			var immutable []string
+			if current.Type != resolved.Type {
+				immutable = append(immutable, "type")
+			}
+			if current.Image != resolved.Image {
+				immutable = append(immutable, "image")
+			}
+			if current.RootDisk.Type != resolved.RootDisk.Type {
+				immutable = append(immutable, "root disk type")
+			}
+			if current.RootDisk.Encrypted != resolved.RootDisk.Encrypted {
+				immutable = append(immutable, "root disk encryption")
+			}
+			if len(immutable) > 0 {
+				*changes = append(*changes, change("instance", ActionReplace, "instance|"+item.Name, strings.Join(immutable, ", ")+" is immutable", Target{Kind: TargetInstance, Instance: resolved}))
+				continue
+			}
+			if current.Role != resolved.Role || current.Firewall != resolved.Firewall || current.Imdsv2Required != resolved.Imdsv2Required ||
+				current.RootDisk.Size != resolved.RootDisk.Size || !tagsSatisfy(resolved.Tags, current.Tags) {
+				updated := resolved
+				updated.ID = current.ID
+				merged := map[string]string{}
+				maps.Copy(merged, current.Tags)
+				maps.Copy(merged, resolved.Tags)
+				updated.Tags = merged
+				c := change("instance", ActionUpdate, "instance|"+item.Name, "role, firewall, metadata, disk size, or declared tags differ", Target{Kind: TargetInstance, Instance: updated})
+				c.Diffs = instanceDiffs(current, resolved)
+				*changes = append(*changes, c)
+			}
+		}
+		var kindDeletes []Change
+		if options.PruneHosts {
+			for _, item := range live {
+				if !desired[item.Name] {
+					kindDeletes = append(kindDeletes, change("instance", ActionDelete, "instance|"+item.Name, "absent from specs", Target{Kind: TargetInstance, Instance: item}))
+				}
+			}
+		}
+		collect(kindDeletes)
+	}
+
+	if wanted(options, "staticAddress") && len(bundle.Addresses) > 0 {
+		compute, ok := provider.(ComputeProvider)
+		if !ok {
+			return unsupportedKind(options.Provider, "staticAddress")
+		}
+		live, err := compute.ListAddresses()
+		if err != nil {
+			return err
+		}
+		desired := map[string]bool{}
+		for _, item := range bundle.Addresses {
+			desired[item.Name] = true
+			current, found := findAddress(live, item.Name)
+			switch {
+			case !found:
+				*changes = append(*changes, change("staticAddress", ActionCreate, "staticAddress|"+item.Name, "missing", Target{Kind: TargetAddress, Address: item}))
+			case current.Instance != item.Instance:
+				updated := item
+				updated.ID = current.ID
+				c := change("staticAddress", ActionUpdate, "staticAddress|"+item.Name, "attached instance differs", Target{Kind: TargetAddress, Address: updated})
+				c.Diffs = []FieldDiff{{Field: "instance", Old: current.Instance, New: item.Instance}}
+				*changes = append(*changes, c)
+			}
+		}
+		var kindDeletes []Change
+		if options.PruneHosts {
+			for _, item := range live {
+				if !desired[item.Name] {
+					kindDeletes = append(kindDeletes, change("staticAddress", ActionDelete, "staticAddress|"+item.Name, "absent from specs", Target{Kind: TargetAddress, Address: item}))
+				}
+			}
+		}
+		collect(kindDeletes)
+	}
+
+	for i := len(deletes) - 1; i >= 0; i-- {
+		*changes = append(*changes, deletes[i]...)
+	}
+	return nil
+}
+
+func findIamRole(items []IamRole, name string) (IamRole, bool) {
+	for _, item := range items {
+		if item.Name == name {
+			return item, true
+		}
+	}
+	return IamRole{}, false
+}
+
+func findBucket(items []Bucket, name string) (Bucket, bool) {
+	for _, item := range items {
+		if item.Name == name {
+			return item, true
+		}
+	}
+	return Bucket{}, false
+}
+
+func findFirewall(items []Firewall, name string) (Firewall, bool) {
+	for _, item := range items {
+		if item.Name == name {
+			return item, true
+		}
+	}
+	return Firewall{}, false
+}
+
+func findInstance(items []Instance, name string) (Instance, bool) {
+	for _, item := range items {
+		if item.Name == name {
+			return item, true
+		}
+	}
+	return Instance{}, false
+}
+
+func findAddress(items []StaticAddress, name string) (StaticAddress, bool) {
+	for _, item := range items {
+		if item.Name == name {
+			return item, true
+		}
+	}
+	return StaticAddress{}, false
+}
+
+func iamRoleDiffs(current, desired IamRole) []FieldDiff {
+	diffs := setDiffs("managedPolicies", current.ManagedPolicies, desired.ManagedPolicies)
+	var names []string
+	for name := range desired.InlinePolicies {
+		names = append(names, name)
+	}
+	for name := range current.InlinePolicies {
+		if _, ok := desired.InlinePolicies[name]; !ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		before, hadBefore := current.InlinePolicies[name]
+		after, hasAfter := desired.InlinePolicies[name]
+		switch {
+		case !hadBefore:
+			diffs = append(diffs, FieldDiff{Field: "inlinePolicy " + name, New: "added"})
+		case !hasAfter:
+			diffs = append(diffs, FieldDiff{Field: "inlinePolicy " + name, Old: "removed"})
+		case canonicalJSON(before) != canonicalJSON(after):
+			diffs = append(diffs, FieldDiff{Field: "inlinePolicy " + name, Old: "document", New: "changed"})
+		}
+	}
+	if current.InstanceProfile != desired.InstanceProfile {
+		diffs = append(diffs, FieldDiff{Field: "instanceProfile", Old: strconv.FormatBool(current.InstanceProfile), New: strconv.FormatBool(desired.InstanceProfile)})
+	}
+	return diffs
+}
+
+func bucketDiffs(current, desired Bucket) []FieldDiff {
+	var diffs []FieldDiff
+	if current.PublicAccessBlock != desired.PublicAccessBlock {
+		diffs = append(diffs, FieldDiff{Field: "publicAccessBlock", Old: fmt.Sprintf("%+v", current.PublicAccessBlock), New: fmt.Sprintf("%+v", desired.PublicAccessBlock)})
+	}
+	if current.Encryption != desired.Encryption {
+		diffs = append(diffs, FieldDiff{Field: "encryption", Old: current.Encryption, New: desired.Encryption})
+	}
+	return diffs
+}
+
+func firewallDiffs(current, desired Firewall) []FieldDiff {
+	return setDiffs("rule", ruleKeys(current.Rules), ruleKeys(desired.Rules))
+}
+
+func instanceDiffs(current, desired Instance) []FieldDiff {
+	var diffs []FieldDiff
+	scalar := func(field, before, after string) {
+		if before != after {
+			diffs = append(diffs, FieldDiff{Field: field, Old: before, New: after})
+		}
+	}
+	scalar("role", current.Role, desired.Role)
+	scalar("firewall", current.Firewall, desired.Firewall)
+	scalar("imdsv2Required", strconv.FormatBool(current.Imdsv2Required), strconv.FormatBool(desired.Imdsv2Required))
+	scalar("rootDisk.size", strconv.FormatInt(current.RootDisk.Size, 10), strconv.FormatInt(desired.RootDisk.Size, 10))
+	var keys []string
+	for k := range desired.Tags {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if current.Tags[k] != desired.Tags[k] {
+			diffs = append(diffs, FieldDiff{Field: "tag " + k, Old: current.Tags[k], New: desired.Tags[k]})
+		}
+	}
+	return diffs
 }

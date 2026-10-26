@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -133,11 +134,17 @@ type Bundle struct {
 	RoleDefinitions []RoleDefinition
 	RoleAssignments []RoleAssignment
 	ResourceGroups  []ResourceGroup
+	IamRoles        []IamRole
+	Buckets         []Bucket
+	Firewalls       []Firewall
+	Instances       []Instance
+	Addresses       []StaticAddress
 }
 
 // Len returns the total number of specs across every kind.
 func (b Bundle) Len() int {
-	return len(b.Dns) + len(b.Groups) + len(b.Apps) + len(b.RoleDefinitions) + len(b.RoleAssignments) + len(b.ResourceGroups)
+	return len(b.Dns) + len(b.Groups) + len(b.Apps) + len(b.RoleDefinitions) + len(b.RoleAssignments) + len(b.ResourceGroups) +
+		len(b.IamRoles) + len(b.Buckets) + len(b.Firewalls) + len(b.Instances) + len(b.Addresses)
 }
 
 // IsEmpty reports whether the bundle has no specs of any kind.
@@ -165,6 +172,21 @@ func (b Bundle) Providers() []string {
 		seen[item.Provider] = true
 	}
 	for _, item := range b.ResourceGroups {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.IamRoles {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.Buckets {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.Firewalls {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.Instances {
+		seen[item.Provider] = true
+	}
+	for _, item := range b.Addresses {
 		seen[item.Provider] = true
 	}
 	names := make([]string, 0, len(seen))
@@ -207,6 +229,31 @@ func (b Bundle) ForProvider(provider string) *Bundle {
 	for _, item := range b.ResourceGroups {
 		if item.Provider == provider {
 			part.ResourceGroups = append(part.ResourceGroups, item)
+		}
+	}
+	for _, item := range b.IamRoles {
+		if item.Provider == provider {
+			part.IamRoles = append(part.IamRoles, item)
+		}
+	}
+	for _, item := range b.Buckets {
+		if item.Provider == provider {
+			part.Buckets = append(part.Buckets, item)
+		}
+	}
+	for _, item := range b.Firewalls {
+		if item.Provider == provider {
+			part.Firewalls = append(part.Firewalls, item)
+		}
+	}
+	for _, item := range b.Instances {
+		if item.Provider == provider {
+			part.Instances = append(part.Instances, item)
+		}
+	}
+	for _, item := range b.Addresses {
+		if item.Provider == provider {
+			part.Addresses = append(part.Addresses, item)
 		}
 	}
 	return part
@@ -263,4 +310,146 @@ func sameLocation(a, b string) bool {
 
 func normalizeLocation(location string) string {
 	return strings.ToLower(strings.ReplaceAll(location, " ", ""))
+}
+
+// IamRole is a role an instance assumes, with managed policies by ARN,
+// inline policy documents by name, and an optional instance profile of the
+// same name. The trust policy is fixed to the provider's compute service.
+type IamRole struct {
+	Provider        string
+	Name            string
+	ManagedPolicies []string
+	InlinePolicies  map[string]any
+	InstanceProfile bool
+}
+
+// PublicAccessBlock is a bucket's four public-access settings; a spec that
+// omits the block gets every setting on.
+type PublicAccessBlock struct {
+	BlockPublicAcls       bool
+	IgnorePublicAcls      bool
+	BlockPublicPolicy     bool
+	RestrictPublicBuckets bool
+}
+
+// Bucket is an object-storage bucket with its region, public access block,
+// and default encryption, `aes256` or a key ARN.
+type Bucket struct {
+	Provider          string
+	Name              string
+	Region            string
+	PublicAccessBlock PublicAccessBlock
+	Encryption        string
+}
+
+// FirewallRule is one ingress rule: a protocol, a port range, and sources
+// that are CIDRs or the names of other firewalls.
+type FirewallRule struct {
+	Protocol string
+	FromPort int64
+	ToPort   int64
+	Sources  []string
+}
+
+// Firewall is a named ingress rule set in a network, the default one unless
+// VPC names another by its Name tag. ID is the live identifier, empty in a
+// spec.
+type Firewall struct {
+	Provider string
+	ID       string
+	Name     string
+	VPC      string
+	Rules    []FirewallRule
+}
+
+// RootDisk is an instance's root volume.
+type RootDisk struct {
+	Size      int64
+	Type      string
+	Encrypted bool
+}
+
+// Instance is a virtual machine named by tag. Image is an image id or a
+// parameter path the provider resolves. Tags use merge semantics. ID is the
+// live identifier, empty in a spec.
+type Instance struct {
+	Provider       string
+	ID             string
+	Name           string
+	Type           string
+	Image          string
+	Role           string
+	Firewall       string
+	Imdsv2Required bool
+	RootDisk       RootDisk
+	Tags           map[string]string
+}
+
+// StaticAddress is a public address named by tag and attached to an
+// instance. ID is the live allocation, PublicIP the live address; both are
+// empty in a spec.
+type StaticAddress struct {
+	Provider string
+	ID       string
+	Name     string
+	Instance string
+	PublicIP string
+}
+
+// key renders a rule in a canonical form for set comparison.
+func (r FirewallRule) key() string {
+	return fmt.Sprintf("%s|%d|%d|%s", strings.ToLower(r.Protocol), r.FromPort, r.ToPort, strings.Join(normalized(r.Sources), ","))
+}
+
+// sameRules reports whether two rule sets are equal regardless of order.
+func sameRules(a, b []FirewallRule) bool {
+	return stringsEqual(ruleKeys(a), ruleKeys(b))
+}
+
+// ruleKeys renders a rule set as sorted one-source keys, so two sets that
+// group the same sources differently compare equal.
+func ruleKeys(rules []FirewallRule) []string {
+	atomic := atomicRules(rules)
+	keys := make([]string, 0, len(atomic))
+	for _, r := range atomic {
+		keys = append(keys, r.key())
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// atomicRules expands every rule to one rule per source.
+func atomicRules(rules []FirewallRule) []FirewallRule {
+	var out []FirewallRule
+	for _, r := range rules {
+		for _, source := range r.Sources {
+			out = append(out, FirewallRule{Protocol: r.Protocol, FromPort: r.FromPort, ToPort: r.ToPort, Sources: []string{source}})
+		}
+	}
+	return out
+}
+
+// canonicalJSON renders a policy document with sorted keys so a spec's
+// mapping compares equal to the live document.
+func canonicalJSON(document any) string {
+	b, err := json.Marshal(document)
+	if err != nil {
+		return fmt.Sprintf("%v", document)
+	}
+	return string(b)
+}
+
+// samePolicies reports whether two inline policy sets hold the same
+// documents under the same names.
+func samePolicies(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, doc := range a {
+		other, ok := b[name]
+		if !ok || canonicalJSON(doc) != canonicalJSON(other) {
+			return false
+		}
+	}
+	return true
 }

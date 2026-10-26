@@ -20,6 +20,7 @@ type Config struct {
 	PruneIdentities     *bool
 	PruneRoles          *bool
 	PruneResourceGroups *bool
+	PruneHosts          *bool
 	ProviderBlocks      map[string]map[string]any
 }
 
@@ -33,6 +34,7 @@ type Overrides struct {
 	PruneIdentities     *bool
 	PruneRoles          *bool
 	PruneResourceGroups *bool
+	PruneHosts          *bool
 	Kind                string
 	Diagnostic          bool
 	Verbose             bool
@@ -48,6 +50,7 @@ type Settings struct {
 	PruneIdentities     bool
 	PruneRoles          bool
 	PruneResourceGroups bool
+	PruneHosts          bool
 	Kind                string
 	Diagnostic          bool
 	Verbose             bool
@@ -152,7 +155,7 @@ func ParseConfig(raw []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknown(prune, []string{"dns", "identities", "roles", "resource_groups"}, "attune.yaml prune"); err != nil {
+	if err := rejectUnknown(prune, []string{"dns", "identities", "roles", "resource_groups", "hosts"}, "attune.yaml prune"); err != nil {
 		return nil, err
 	}
 
@@ -188,6 +191,10 @@ func ParseConfig(raw []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	pruneHosts, err := optionalBool(prune, "hosts")
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		Provider:            provider,
@@ -198,6 +205,7 @@ func ParseConfig(raw []byte) (*Config, error) {
 		PruneIdentities:     pruneIdentities,
 		PruneRoles:          pruneRoles,
 		PruneResourceGroups: pruneResourceGroups,
+		PruneHosts:          pruneHosts,
 		ProviderBlocks:      blocks,
 	}, nil
 }
@@ -212,6 +220,7 @@ func Resolve(config *Config, overrides Overrides) Settings {
 		PruneIdentities:     false,
 		PruneRoles:          false,
 		PruneResourceGroups: false,
+		PruneHosts:          false,
 		Kind:                overrides.Kind,
 		Diagnostic:          overrides.Diagnostic,
 		Verbose:             overrides.Verbose,
@@ -241,6 +250,9 @@ func Resolve(config *Config, overrides Overrides) Settings {
 		if config.PruneResourceGroups != nil {
 			settings.PruneResourceGroups = *config.PruneResourceGroups
 		}
+		if config.PruneHosts != nil {
+			settings.PruneHosts = *config.PruneHosts
+		}
 	}
 	if v := os.Getenv("ARM_SUBSCRIPTION_ID"); v != "" {
 		settings.Subscription = v
@@ -268,6 +280,9 @@ func Resolve(config *Config, overrides Overrides) Settings {
 	}
 	if overrides.PruneResourceGroups != nil {
 		settings.PruneResourceGroups = *overrides.PruneResourceGroups
+	}
+	if overrides.PruneHosts != nil {
+		settings.PruneHosts = *overrides.PruneHosts
 	}
 	return settings
 }

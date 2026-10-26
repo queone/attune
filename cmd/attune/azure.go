@@ -138,10 +138,13 @@ var (
 	_ LiveProvider = (*AzureProvider)(nil)
 )
 
+// azureKinds is every kind the Azure provider reconciles.
+var azureKinds = []string{"dnsRecordSet", "securityGroup", "appRegistration", "roleDefinition", "roleAssignment", "resourceGroup"}
+
 func init() {
 	Register(ProviderSpec{
 		Name:        "azure",
-		Kinds:       validKinds,
+		Kinds:       azureKinds,
 		ConfigBlock: "azure",
 		New: func(settings Settings, _ map[string]any) (LiveProvider, error) {
 			return NewAzureProvider(settings.Subscription, settings.ResourceGroup), nil

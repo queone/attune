@@ -588,7 +588,7 @@ func TestAddRejectsAnUnknownProviderAtSaveTime(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("provider: nope\nkind: dnsRecordSet\nzone: example.com\ntype: A\nname: bad\nttl: 300\nvalues:\n  - 192.0.2.11\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, errs := h.mustFail(1, "add", "zones/bad.yaml", bad); !strings.Contains(errs, `unknown provider "nope"; registered: azure`) {
+	if _, errs := h.mustFail(1, "add", "zones/bad.yaml", bad); !strings.Contains(errs, `unknown provider "nope"; registered: aws, azure`) {
 		t.Fatalf("add with unknown provider: %q", errs)
 	}
 	if got := lsNames(h.mustRun("ls")); len(got) != 7 {

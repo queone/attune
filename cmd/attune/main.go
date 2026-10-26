@@ -20,7 +20,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.8.0"
+	programVersion = "1.9.0"
 )
 
 var validKinds = []string{
@@ -30,6 +30,11 @@ var validKinds = []string{
 	"roleDefinition",
 	"roleAssignment",
 	"resourceGroup",
+	"iamRole",
+	"bucket",
+	"firewall",
+	"instance",
+	"staticAddress",
 }
 
 type commandKind int
@@ -236,6 +241,7 @@ func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle
 			PruneIdentities:     settings.PruneIdentities,
 			PruneRoles:          settings.PruneRoles,
 			PruneResourceGroups: settings.PruneResourceGroups,
+			PruneHosts:          settings.PruneHosts,
 		}
 		changes, err := Plan(provider, part, options)
 		if err != nil {
@@ -316,6 +322,8 @@ func changeSymbol(a Action) string {
 		return "+"
 	case ActionDelete:
 		return "-"
+	case ActionReplace:
+		return "!"
 	default:
 		return "~"
 	}
@@ -489,6 +497,12 @@ func parseFlags(args []string) (Overrides, error) {
 				return overrides, err
 			}
 			overrides.PruneResourceGroups = &b
+		case "-H", "--prune-hosts":
+			b, err := boolValue(inline)
+			if err != nil {
+				return overrides, err
+			}
+			overrides.PruneHosts = &b
 		case "-d", "--diagnostic":
 			if inline != nil {
 				return overrides, fmt.Errorf("%s does not take a value", name)
@@ -531,15 +545,15 @@ func helpDoc() help.Doc {
 	return help.Doc{
 		Name:        programName,
 		Version:     programVersion,
-		Description: "Reconcile Azure state from YAML specs kept in an encrypted store",
+		Description: "Reconcile cloud state from YAML specs kept in an encrypted store",
 		URL:         "github.com/queone/" + programName,
 		Sections: []help.Section{
-			{Title: "Usage", Rows: []help.Row{{Form: programName + " COMMAND [flags]", Meaning: "Keep Azure DNS, groups, app registrations, roles, and resource groups matching the stored specs"}},
+			{Title: "Usage", Rows: []help.Row{{Form: programName + " COMMAND [flags]", Meaning: "Keep DNS, groups, app registrations, roles, resource groups, and hosts matching the stored specs"}},
 				Lines: []string{
 					"Store path order: -t, then ATTUNE_STORE, then the path init -t remembered in",
 					"$XDG_CONFIG_HOME/attune/store, then $XDG_DATA_HOME/attune/attune.store.",
-					"Live commands need an authenticated Azure CLI (az login). init and edit need a",
-					"terminal. The store is macOS only.",
+					"Live commands need the provider's CLI signed in: az login for azure, aws",
+					"configure for aws. init and edit need a terminal. The store is macOS only.",
 				}},
 			{Title: "Commands", Rows: []help.Row{
 				{Form: "(c|validate) [flags]", Meaning: "check the stored specs offline"},
@@ -563,7 +577,7 @@ func helpDoc() help.Doc {
 			}, Lines: []string{
 				"A NAME is a relative path ending in .yaml or .yml (res/dns/zone.yaml), or",
 				"attune.yaml for the configuration. add and edit validate before saving.",
-				"Drift against Azure is what plan reports; st never contacts Azure.",
+				"Drift against the provider is what plan reports; st never contacts one.",
 				"render writes plaintext copies of the store; delete the directory when done.",
 			}},
 			{Title: "Options", Rows: []help.Row{
@@ -576,6 +590,7 @@ func helpDoc() help.Doc {
 				{Form: "-I, --prune-identities[=BOOL]", Meaning: "Delete unmanaged groups and app registrations; off by default"},
 				{Form: "-R, --prune-roles[=BOOL]", Meaning: "Delete unmanaged role definitions and assignments; off by default"},
 				{Form: "-G, --prune-resource-groups[=BOOL]", Meaning: "Delete unmanaged resource groups; off by default"},
+				{Form: "-H, --prune-hosts[=BOOL]", Meaning: "Delete unmanaged instances, addresses, firewalls, buckets, and IAM roles; off by default"},
 				{Form: "-d, --diagnostic", Meaning: "Print non-secret account and target grounding on live commands"},
 				{Form: "-V, --verbose", Meaning: "Field-level detail on plan and apply"},
 				{Form: "-N, --new", Meaning: "Create a new store (init)"},

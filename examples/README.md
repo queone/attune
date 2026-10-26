@@ -16,8 +16,15 @@ attune validate
 attune key rm -f && rm "$ATTUNE_STORE" && unset ATTUNE_STORE
 ```
 
+A second example, `aws/`, is a store for the `aws` provider: an `attune.yaml`
+with the `aws` block, one Route 53 record set, and one host declared as an IAM
+role, a bucket, a firewall, an instance, and a static address. Validate it the
+same way from inside `aws/`. Its live commands need the AWS CLI configured
+(`aws configure`); the image parameter path, the TEST-NET source, and the
+`example-*` names are placeholders like the Azure example's.
+
 `validate` reads the stored configuration and specifications only. In contrast,
-`attune plan` authenticates to Azure and reads live provider state, while
+`attune plan` authenticates to the provider and reads live state, while
 `attune apply` can create, update, and delete provider resources according to
 the reviewed plan and enabled prune policies.
 

@@ -69,7 +69,7 @@ func TestHelpOutput(t *testing.T) {
 		if lines[0] != "attune v"+programVersion {
 			t.Errorf("%v: first line %q", args, lines[0])
 		}
-		if lines[1] != "Reconcile Azure state from YAML specs kept in an encrypted store" {
+		if lines[1] != "Reconcile cloud state from YAML specs kept in an encrypted store" {
 			t.Errorf("%v: second line %q", args, lines[1])
 		}
 		last := -1
@@ -80,7 +80,7 @@ func TestHelpOutput(t *testing.T) {
 			}
 			last = idx
 		}
-		for _, want := range []string{"(p|plan)", "-d, --diagnostic", "-t, --store PATH", "-P, --provider NAME", "Default provider for specs that omit provider", "  key show", "  rename OLD NEW", "  edit NAME", "-b, --by FIELD", "macOS only", "status of the store, key, entries, and last save"} {
+		for _, want := range []string{"(p|plan)", "-d, --diagnostic", "-t, --store PATH", "-P, --provider NAME", "Default provider for specs that omit provider", "az login for azure, aws", "configure for aws", "-H, --prune-hosts[=BOOL]", "off by default", "  key show", "  rename OLD NEW", "  edit NAME", "-b, --by FIELD", "macOS only", "status of the store, key, entries, and last save"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("%v: help output missing %q", args, want)
 			}
@@ -607,7 +607,7 @@ func TestProviderFlagMustNameARegisteredProvider(t *testing.T) {
 	h := newHarness(t)
 	h.initAndAdd()
 	_, errs := h.mustFail(1, "validate", "-P", "nope")
-	if !strings.Contains(errs, `unknown provider "nope"; registered: azure`) {
+	if !strings.Contains(errs, `unknown provider "nope"; registered: aws, azure`) {
 		t.Errorf("stderr = %q", errs)
 	}
 	if out := h.mustRun("validate", "-P", "azure"); !strings.HasPrefix(out, "attune validate: OK (6 specs)") {
@@ -665,5 +665,60 @@ func TestLiveRunPrintsOneBlockPerProvider(t *testing.T) {
 	}
 	if strings.Index(stdout, "attune apply: provider=alpha") < strings.Index(stdout, "attune plan: provider=beta") {
 		t.Errorf("apply started before every provider was planned:\n%s", stdout)
+	}
+}
+
+// TestAwsExampleValidatesOffline — AT1: the second public example, an aws
+// store with one Route 53 record set, validates offline without writes.
+func TestAwsExampleValidatesOffline(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "aws")
+	before := collectFileNames(t, root)
+	h := newHarness(t)
+	h.mustRun("init", "-N")
+	h.mustRun("add", "attune.yaml", filepath.Join(root, "attune.yaml"))
+	h.mustRun("add", filepath.Join(root, "specs"))
+	want := "attune validate: OK (6 specs) content=v0.1.0\n"
+	if out := h.mustRun("validate"); out != want {
+		t.Errorf("stdout = %q, want %q", out, want)
+	}
+	if len(before) != len(collectFileNames(t, root)) {
+		t.Errorf("validate modified the example")
+	}
+}
+
+// TestAwsExampleHasOneOfEveryHostKind — AT1: the aws example holds one
+// spec per kind the aws provider supports.
+func TestAwsExampleHasOneOfEveryHostKind(t *testing.T) {
+	bundle, err := loadDir(t, filepath.Join("..", "..", "examples", "aws", "specs"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	counts := map[string]int{"dns": len(bundle.Dns), "iamRoles": len(bundle.IamRoles), "buckets": len(bundle.Buckets),
+		"firewalls": len(bundle.Firewalls), "instances": len(bundle.Instances), "addresses": len(bundle.Addresses)}
+	for name, count := range counts {
+		if count != 1 {
+			t.Errorf("%s count = %d, want 1", name, count)
+		}
+	}
+	if got := bundle.Providers(); len(got) != 1 || got[0] != "aws" {
+		t.Errorf("providers = %v, want [aws]", got)
+	}
+}
+
+// TestPruneHostsFlagParsesAndDefaultsOff — AT6: -H and --prune-hosts parse
+// in both forms and host pruning is off without them.
+func TestPruneHostsFlagParsesAndDefaultsOff(t *testing.T) {
+	if Resolve(nil, Overrides{}).PruneHosts {
+		t.Error("PruneHosts defaults on")
+	}
+	for _, args := range [][]string{{"-H"}, {"--prune-hosts"}, {"-H=true"}} {
+		overrides, err := parseFlags(args)
+		if err != nil || overrides.PruneHosts == nil || !*overrides.PruneHosts || !Resolve(nil, overrides).PruneHosts {
+			t.Errorf("%v: parseFlags = %+v, %v", args, overrides, err)
+		}
+	}
+	overrides, err := parseFlags([]string{"-H=false"})
+	if err != nil || overrides.PruneHosts == nil || *overrides.PruneHosts {
+		t.Errorf("-H=false: %+v, %v", overrides, err)
 	}
 }
