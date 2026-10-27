@@ -391,6 +391,7 @@ func TestAwsCreatesHostInDependencyOrder(t *testing.T) {
 		"ec2 authorize-security-group-ingress":   {{out: `{"Return":true}`}},
 		"ec2 describe-images":                    {{out: `{"Images":[{"RootDeviceName":"/dev/xvda"}]}`}},
 		"ec2 run-instances":                      {{out: `{"Instances":[{"InstanceId":"i-0new"}]}`}},
+		"ec2 describe-instances":                 {{out: `{"Reservations":[{"Instances":[{"InstanceId":"i-0new","State":{"Name":"running"},"Tags":[{"Key":"Name","Value":"example-host"}]}]}]}`}},
 		"ec2 allocate-address":                   {{out: `{"AllocationId":"eipalloc-0new","PublicIp":"203.0.113.10"}`}},
 		"ec2 associate-address":                  {{out: `{"AssociationId":"eipassoc-0new"}`}},
 	})
@@ -417,7 +418,7 @@ func TestAwsCreatesHostInDependencyOrder(t *testing.T) {
 		"s3api create-bucket", "s3api put-bucket-tagging", "s3api put-public-access-block", "s3api put-bucket-encryption",
 		"ec2 describe-vpcs", "ec2 create-security-group", "ec2 authorize-security-group-ingress",
 		"ec2 describe-images", "ec2 run-instances",
-		"ec2 allocate-address", "ec2 associate-address",
+		"ec2 describe-instances", "ec2 allocate-address", "ec2 associate-address",
 		"route53 list-hosted-zones-by-name", "route53 create-hosted-zone", "route53 change-resource-record-sets",
 	}
 	if got := cli.pairs(); strings.Join(got, ";") != strings.Join(wantPairs, ";") {
@@ -606,6 +607,7 @@ func TestAwsReferenceResolvesAfterTheAddressIsCreated(t *testing.T) {
 		"ec2 authorize-security-group-ingress":   {{out: `{}`}},
 		"ec2 describe-images":                    {{out: `{"Images":[{"RootDeviceName":"/dev/xvda"}]}`}},
 		"ec2 run-instances":                      {{out: `{"Instances":[{"InstanceId":"i-0new"}]}`}},
+		"ec2 describe-instances":                 {{out: `{"Reservations":[{"Instances":[{"InstanceId":"i-0new","State":{"Name":"running"},"Tags":[{"Key":"Name","Value":"example-host"}]}]}]}`}},
 		"ec2 allocate-address":                   {{out: `{"AllocationId":"eipalloc-0new","PublicIp":"203.0.113.10"}`}},
 		"ec2 associate-address":                  {{out: `{}`}},
 	})
@@ -773,6 +775,7 @@ func TestAwsCreatesBudgetAndHealthCheck(t *testing.T) {
 		"ec2 authorize-security-group-ingress":   {{out: `{}`}},
 		"ec2 describe-images":                    {{out: `{"Images":[{"RootDeviceName":"/dev/xvda"}]}`}},
 		"ec2 run-instances":                      {{out: `{"Instances":[{"InstanceId":"i-0new"}]}`}},
+		"ec2 describe-instances":                 {{out: `{"Reservations":[{"Instances":[{"InstanceId":"i-0new","State":{"Name":"running"},"Tags":[{"Key":"Name","Value":"example-host"}]}]}]}`}},
 		"ec2 allocate-address":                   {{out: `{"AllocationId":"eipalloc-0new","PublicIp":"203.0.113.10"}`}},
 		"ec2 associate-address":                  {{out: `{}`}},
 	}
@@ -1114,5 +1117,56 @@ func TestAwsLaunchRetriesWhileProfilePropagates(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "aws ec2 run-instances failed with exit 254") || launches != 7 || total != 30*time.Second {
 		t.Errorf("err=%v launches=%d slept=%v", err, launches, total)
+	}
+}
+
+// TestAwsAddressWaitsForTheInstanceToRun — a launched instance is pending
+// for a while; the address attaches only once it runs, and an instance
+// that stops being pending without running is reported.
+func TestAwsAddressWaitsForTheInstanceToRun(t *testing.T) {
+	stateJSON := func(state string) string {
+		return `{"Reservations":[{"Instances":[{"InstanceId":"i-0new","State":{"Name":"` + state + `"},"Tags":[{"Key":"Name","Value":"example-host"}]}]}]}`
+	}
+	provider, cli := newAwsFake(map[string][]fakeAwsResult{
+		"ec2 describe-instances": {{out: stateJSON("pending")}, {out: stateJSON("pending")}, {out: stateJSON("running")}},
+		"ec2 allocate-address":   {{out: `{"AllocationId":"eipalloc-0new","PublicIp":"203.0.113.10"}`}},
+		"ec2 associate-address":  {{out: `{}`}},
+	})
+	var sleeps []time.Duration
+	provider.sleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+	provider.host().instanceIDs["example-host"] = "i-0new"
+	ip, err := provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"})
+	if err != nil || ip != "203.0.113.10" || len(sleeps) != 2 {
+		t.Fatalf("ip=%q err=%v sleeps=%v", ip, err, sleeps)
+	}
+	pairs := cli.pairs()
+	lastPoll := -1
+	for i, pair := range pairs {
+		if pair == "ec2 describe-instances" {
+			lastPoll = i
+		}
+	}
+	if slices.Index(pairs, "ec2 associate-address") < lastPoll {
+		t.Errorf("associated before the last poll: %v", pairs)
+	}
+
+	provider, cli = newAwsFake(map[string][]fakeAwsResult{"ec2 describe-instances": {{out: stateJSON("pending")}}})
+	sleeps = nil
+	provider.sleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+	provider.host().instanceIDs["example-host"] = "i-0new"
+	_, err = provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"})
+	var total time.Duration
+	for _, d := range sleeps {
+		total += d
+	}
+	if err == nil || !strings.Contains(err.Error(), "is pending, not running") || total != 60*time.Second || slices.Contains(cli.pairs(), "ec2 allocate-address") {
+		t.Errorf("err=%v slept=%v calls=%v", err, total, cli.pairs())
+	}
+
+	provider, _ = newAwsFake(map[string][]fakeAwsResult{"ec2 describe-instances": {{out: stateJSON("terminated")}}})
+	provider.sleep = func(time.Duration) {}
+	provider.host().instanceIDs["example-host"] = "i-0new"
+	if _, err := provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"}); err == nil || !strings.Contains(err.Error(), "is terminated, not running") {
+		t.Errorf("terminated instance: %v", err)
 	}
 }

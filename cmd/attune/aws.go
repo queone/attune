@@ -1510,6 +1510,9 @@ func (p *AwsProvider) PutAddress(address StaticAddress) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := p.waitForRunning(instanceID); err != nil {
+		return "", err
+	}
 	if address.ID == "" {
 		var allocated awsAddress
 		if err := p.run("ec2", "allocate-address", &allocated, "--domain", "vpc", "--tag-specifications", awsTagSpec("elastic-ip", address.Name, nil)); err != nil {
@@ -1993,11 +1996,41 @@ func (p *AwsProvider) DeleteHealthCheck(check HealthCheck) error {
 }
 
 // awsLaunchRetries and awsLaunchRetryDelay bound the retry of run-instances
-// while IAM propagates a freshly created instance profile.
+// while IAM propagates a freshly created instance profile. awsRunningPolls
+// and awsRunningPollDelay bound the wait for a new instance to leave
+// pending, since an address cannot attach before then.
 const (
 	awsLaunchRetries    = 6
 	awsLaunchRetryDelay = 5 * time.Second
+	awsRunningPolls     = 12
+	awsRunningPollDelay = 5 * time.Second
 )
+
+// waitForRunning polls the instance until it is running, for about a
+// minute, so an address can attach to an instance launched moments ago.
+func (p *AwsProvider) waitForRunning(instanceID string) error {
+	state := ""
+	for poll := 0; poll <= awsRunningPolls; poll++ {
+		if poll > 0 {
+			p.sleep(awsRunningPollDelay)
+		}
+		raw, err := p.describeInstances([]string{instanceID})
+		if err != nil {
+			return err
+		}
+		if len(raw) != 1 {
+			return fmt.Errorf("instance %s not found", instanceID)
+		}
+		state = raw[0].State.Name
+		if state == "running" {
+			return nil
+		}
+		if state != "pending" {
+			break
+		}
+	}
+	return fmt.Errorf("instance %s is %s, not running; an address cannot attach until it runs", instanceID, state)
+}
 
 // runInstancesWithRetry launches an instance, retrying a failed launch a
 // few times over about thirty seconds, since a profile created moments ago
