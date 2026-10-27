@@ -1200,17 +1200,17 @@ func alertChainStaysInAlarmRegion(t *testing.T, cli *fakeAwsCli, from int) {
 	}
 }
 
-// TestReadmeNamesHealthCheckGuardrailEntries — AT4: the README names the
+// TestAwsDocNamesHealthCheckGuardrailEntries: the aws provider doc names the
 // four NotAction entries an organization's region guardrail needs for the
 // health check's alert chain in us-east-1.
-func TestReadmeNamesHealthCheckGuardrailEntries(t *testing.T) {
-	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+func TestAwsDocNamesHealthCheckGuardrailEntries(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("..", "..", "docs", "aws.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"`cloudwatch:PutMetricAlarm`", "`cloudwatch:DeleteAlarms`", "`cloudwatch:TagResource`", "`sns:*`"} {
 		if !strings.Contains(string(readme), want) {
-			t.Errorf("README lacks %s", want)
+			t.Errorf("docs/aws.md lacks %s", want)
 		}
 	}
 }

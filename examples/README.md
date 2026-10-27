@@ -23,7 +23,7 @@ budget, and an uptime check that emails on failure. Validate it the same way
 from inside `aws/`. A live `apply` of the check sends each listed address one
 confirmation email, which the recipient must accept before alarms reach it.
 An organization with AWS's region guardrail must first allow the check's SNS
-and CloudWatch actions in `us-east-1`, as the main README describes.
+and CloudWatch actions in `us-east-1`, as `docs/aws.md` describes.
 Its live commands need the AWS CLI signed in to the profile `aws.profile`
 names, with `aws login --profile example` or `aws configure`; the image
 parameter path, the TEST-NET source, and the `example-*` names are

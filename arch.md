@@ -2,7 +2,7 @@
 
 ## Purpose
 
-attune keeps Azure DNS, security groups, app registrations, role definitions, role assignments, and resource groups matching provider-neutral YAML specs, with the live provider as the only source of truth.
+attune keeps cloud resources matching provider-neutral YAML specs kept in an encrypted store, with the live provider as the only source of truth. Each spec names its provider: `azure` holds DNS, groups, app registrations, roles, and resource groups; `aws` holds Route 53 DNS, a host, a budget, and an uptime check.
 
 ## System Summary
 
@@ -26,6 +26,7 @@ attune reads specs and `attune.yaml` from its encrypted store and validates them
 ## Core Files
 
 - `AGENTS.md`: base governance contract
+- `README.md`, `docs/`: the user-facing documentation; one file per provider plus `commands.md` and `store.md`
 - `plan.md`: prioritized roadmap and approved direction
 - `build.sh`: self-contained build / release-prep / release script (Bash 3.2+, no external tools)
 - `govna/development-cycle.md`: workflow from roadmap through release
@@ -54,9 +55,8 @@ Integrated audit adoption is the only command-mediated phase exception. It can a
 - The store is lockbox's sealed SQLite file with its own key under the `attune` Keychain service. Its file starts with the `MACFIT` format tag, which must not change.
 - DNS pruning defaults on. Identity, role, resource-group, host, and monitoring pruning default off.
 - Host kinds plan in dependency order (`iamRole`, `bucket`, `firewall`, `instance`, `staticAddress`, then DNS) and prune in reverse. An immutable-field change plans as `! replace` and apply refuses it.
-- The AWS provider tags everything it creates `attune=managed`, paths IAM under `/attune/`, and lists only those resources, so prune is bounded to attune's own resources. Discovery is per family: IAM by path, buckets and Route 53 health checks by listing and reading tags, EC2 through the tagging API in the configured region. The tagging API is regional and knows global services only from `us-east-1`, the management region for IAM, Route 53, STS, and Budgets.
-- `run-instances` retries for about thirty seconds after a failure, because a freshly created instance profile is not visible to EC2 for a few seconds. An address association waits up to a minute for the instance to run.
-- The `aws` provider's monitoring kinds compose services: a `healthCheck` is a Route 53 health check, an SNS topic named `attune-<name>`, and a CloudWatch alarm, the topic and alarm both in `us-east-1` because Route 53 publishes the check's metric only there and an alarm's topic must share its region; a `budget` is an AWS Budgets cost budget with email notifications. Both are tagged and tag-discovered like the host kinds and prune only under `prune.monitoring`.
+- The AWS provider tags everything it creates `attune=managed`, paths IAM under `/attune/`, and lists only those resources, so prune is bounded to attune's own resources. Discovery is per family, and the tagging API is regional and knows global services only from `us-east-1`, the management region.
+- The `aws` provider's monitoring kinds compose services: a `healthCheck` is a Route 53 health check, an SNS topic, and a CloudWatch alarm, all in `us-east-1`; a `budget` is an AWS Budgets cost budget. Both are tagged and tag-discovered like the host kinds. Operating detail, timing retries included, lives in `docs/aws.md`.
 - A record value may reference another spec's live output (`${kind:name:field}`). The reconciler owns the mechanism: `validate` checks references offline, `Plan` resolves them from live state, and `Apply` records each applied output and fills pending references before the record is sent. References stay within one provider.
 - lockbox comes from `github.com/queone/gkit` at a pinned version. Raise that version deliberately.
 
