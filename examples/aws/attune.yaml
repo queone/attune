@@ -4,7 +4,8 @@ provider: aws
 # Optional declared spec content version, printed in validate and grounding output.
 content_version: v0.1.0
 aws:
-  region: us-east-1
+  # A workload region: us-east-1 is the management region, reserved for global services.
+  region: us-east-2
   profile: example
 prune:
   dns: false

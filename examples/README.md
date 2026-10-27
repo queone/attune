@@ -21,9 +21,12 @@ with the `aws` block, one Route 53 record set, one host declared as an IAM
 role, a bucket, a firewall, an instance, and a static address, a monthly cost
 budget, and an uptime check that emails on failure. Validate it the same way
 from inside `aws/`. A live `apply` of the check sends each listed address one
-confirmation email, which the recipient must accept before alarms reach it. Its live commands need the AWS CLI configured
-(`aws configure`); the image parameter path, the TEST-NET source, and the
-`example-*` names are placeholders like the Azure example's.
+confirmation email, which the recipient must accept before alarms reach it.
+Its live commands need the AWS CLI signed in to the profile `aws.profile`
+names, with `aws login --profile example` or `aws configure`; the image
+parameter path, the TEST-NET source, and the `example-*` names are
+placeholders like the Azure example's. The regions are `us-east-2` because
+`us-east-1` is the management region, which `validate` warns about.
 
 `validate` reads the stored configuration and specifications only. In contrast,
 `attune plan` authenticates to the provider and reads live state, while

@@ -20,7 +20,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.10.2"
+	programVersion = "1.11.0"
 )
 
 var validKinds = []string{
@@ -189,6 +189,9 @@ func (a *app) reconcile(cmd commandKind, args []string) int {
 		return 1
 	}
 	if cmd == cmdValidate {
+		for _, w := range managementRegionWarnings(config, bundle) {
+			a.errorf("warning: %s", w)
+		}
 		fmt.Fprint(a.stdout, validateLine(bundle.Len(), settings.ContentVersion))
 		return 0
 	}

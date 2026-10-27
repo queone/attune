@@ -738,3 +738,35 @@ func TestPruneMonitoringFlagParses(t *testing.T) {
 		t.Errorf("help lacks the -M row")
 	}
 }
+
+// TestValidateWarnsWhenConfiguredRegionIsManagementRegion: an attune.yaml
+// aws block naming us-east-1 still validates OK but warns on stderr, since
+// an organization's region guardrail denies regional services there.
+func TestValidateWarnsWhenConfiguredRegionIsManagementRegion(t *testing.T) {
+	code, out, errs := validateWithConfig(t, "provider: aws\naws:\n  region: us-east-1\n")
+	want := "attune: warning: attune.yaml aws.region names us-east-1" + managementRegionHint + "\n"
+	if code != 0 || !strings.HasPrefix(out, "attune validate: OK (1 specs)") || errs != want {
+		t.Fatalf("code=%d stdout=%q stderr=%q, want warning %q", code, out, errs, want)
+	}
+}
+
+// TestValidateWarnsWhenBucketNamesManagementRegion: a bucket whose region is
+// us-east-1 validates OK with one warning naming the bucket.
+func TestValidateWarnsWhenBucketNamesManagementRegion(t *testing.T) {
+	code, out, errs := validateSyntheticSpec(t, "provider: aws\nkind: bucket\nname: backups\nregion: us-east-1\nencryption: aes256\n")
+	want := "attune: warning: bucket backups names region us-east-1" + managementRegionHint + "\n"
+	if code != 0 || !strings.HasPrefix(out, "attune validate: OK (1 specs)") || errs != want {
+		t.Fatalf("code=%d stdout=%q stderr=%q, want warning %q", code, out, errs, want)
+	}
+}
+
+// TestValidateStaysQuietForWorkloadRegion: a workload region in the aws block
+// or a bucket produces no warning.
+func TestValidateStaysQuietForWorkloadRegion(t *testing.T) {
+	if code, _, errs := validateWithConfig(t, "provider: aws\naws:\n  region: us-east-2\n"); code != 0 || errs != "" {
+		t.Fatalf("config: code=%d stderr=%q, want silence", code, errs)
+	}
+	if code, _, errs := validateSyntheticSpec(t, "provider: aws\nkind: bucket\nname: backups\nregion: us-east-2\nencryption: aes256\n"); code != 0 || errs != "" {
+		t.Fatalf("bucket: code=%d stderr=%q, want silence", code, errs)
+	}
+}

@@ -3,6 +3,7 @@
 | Version | Summary |
 |---------|---------|
 | Unreleased | |
+| 1.11.0 | attune v1.11.0 warns on us-east-1 hosts and documents the AWS account shape |
 | 1.10.2 | attune v1.10.2 waits for a new instance to run before attaching its address |
 | 1.10.1 | AC9: attune v1.10.1 finds AWS resources by family and retries a racing launch |
 | 1.10.0 | AC7+AC8: attune v1.10.0 adds spec references, a budget, and an uptime check |

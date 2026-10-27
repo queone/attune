@@ -37,7 +37,7 @@ func (CommandAwsCli) Run(args []string) ([]byte, error) {
 		if errors.As(err, &exit) {
 			return nil, &CliExit{Code: exit.ExitCode()}
 		}
-		return nil, fmt.Errorf("run the aws CLI: %w; install it and run `aws configure`", err)
+		return nil, fmt.Errorf("run the aws CLI: %w; install it and sign it in with `aws login` or `aws configure`", err)
 	}
 	return out, nil
 }
@@ -96,6 +96,35 @@ func NewAwsProviderFromConfig(cli AwsCli, block map[string]any) (*AwsProvider, e
 		return nil, err
 	}
 	return NewAwsProvider(cli, region, profile), nil
+}
+
+// awsManagementRegion is the region an organization's advanced-mode region
+// guardrail reserves for global services: IAM, Route 53, STS, Budgets, and
+// the tagging API. Regional services are denied there, so a host cannot run
+// in it.
+const awsManagementRegion = "us-east-1"
+
+// managementRegionHint completes a management-region warning with the fix.
+const managementRegionHint = ", the management region, which an organization's region guardrail reserves for global services; use a workload region such as us-east-2"
+
+// managementRegionWarnings lists one warning for each place the stored
+// configuration or a host spec names the management region: the attune.yaml
+// aws block's region, where instances, firewalls, and addresses run, and each
+// bucket's region. An account without the guardrail works there, so validate
+// reports these without failing.
+func managementRegionWarnings(config *Config, bundle *Bundle) []string {
+	var warnings []string
+	if config != nil {
+		if region, ok := config.ProviderBlocks["aws"]["region"].(string); ok && strings.EqualFold(region, awsManagementRegion) {
+			warnings = append(warnings, "attune.yaml aws.region names "+awsManagementRegion+managementRegionHint)
+		}
+	}
+	for _, b := range bundle.Buckets {
+		if strings.EqualFold(b.Region, awsManagementRegion) {
+			warnings = append(warnings, "bucket "+b.Name+" names region "+awsManagementRegion+managementRegionHint)
+		}
+	}
+	return warnings
 }
 
 // NewAwsProvider builds a provider over cli with an optional region and
