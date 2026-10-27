@@ -1586,7 +1586,9 @@ func (p *AwsProvider) DeleteAddress(address StaticAddress) error {
 
 // ---- Budgets
 
-// awsAlarmRegion is where Route 53 health check metrics live.
+// awsAlarmRegion is where Route 53 publishes health check metrics, so the
+// alarm lives there, and with it the SNS topic the alarm notifies, since an
+// alarm action must share the alarm's region.
 const awsAlarmRegion = "us-east-1"
 
 type awsBudget struct {
@@ -1798,7 +1800,7 @@ func (p *AwsProvider) topicARN(check string) (string, error) {
 				ARN string `json:"TopicArn"`
 			} `json:"Topics"`
 		}
-		if err := p.run("sns", "list-topics", &result); err != nil {
+		if err := p.runIn(awsAlarmRegion, "sns", "list-topics", &result); err != nil {
 			return "", err
 		}
 		h.topics = map[string]string{}
@@ -1889,7 +1891,7 @@ func (p *AwsProvider) ListHealthChecks() ([]HealthCheck, error) {
 					Protocol string `json:"Protocol"`
 				} `json:"Subscriptions"`
 			}
-			if err := p.run("sns", "list-subscriptions-by-topic", &subs, "--topic-arn", topic); err != nil {
+			if err := p.runIn(awsAlarmRegion, "sns", "list-subscriptions-by-topic", &subs, "--topic-arn", topic); err != nil {
 				return nil, err
 			}
 			for _, s := range subs.Subscriptions {
@@ -1926,7 +1928,7 @@ func healthCheckConfigJSON(check HealthCheck) string {
 
 // PutHealthCheck creates or updates the Route 53 check with its target
 // already resolved, then brings the topic, its email subscriptions, and the
-// alarm in us-east-1 to the spec.
+// alarm to the spec, all in us-east-1 beside the check's metric.
 func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 	if check.ID == "" {
 		var created struct {
@@ -1961,7 +1963,7 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 	var topic struct {
 		ARN string `json:"TopicArn"`
 	}
-	if err := p.run("sns", "create-topic", &topic, "--name", awsTopicName(check.Name), "--tags", awsTagsJSON("")); err != nil {
+	if err := p.runIn(awsAlarmRegion, "sns", "create-topic", &topic, "--name", awsTopicName(check.Name), "--tags", awsTagsJSON("")); err != nil {
 		return err
 	}
 	if p.host().topics == nil {
@@ -1975,7 +1977,7 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 			ARN      string `json:"SubscriptionArn"`
 		} `json:"Subscriptions"`
 	}
-	if err := p.run("sns", "list-subscriptions-by-topic", &subs, "--topic-arn", topic.ARN); err != nil {
+	if err := p.runIn(awsAlarmRegion, "sns", "list-subscriptions-by-topic", &subs, "--topic-arn", topic.ARN); err != nil {
 		return err
 	}
 	present := map[string]string{}
@@ -1986,7 +1988,7 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 	}
 	for _, email := range normalized(check.Emails) {
 		if _, ok := present[email]; !ok {
-			if err := p.run("sns", "subscribe", nil, "--topic-arn", topic.ARN, "--protocol", "email", "--notification-endpoint", email); err != nil {
+			if err := p.runIn(awsAlarmRegion, "sns", "subscribe", nil, "--topic-arn", topic.ARN, "--protocol", "email", "--notification-endpoint", email); err != nil {
 				return err
 			}
 		}
@@ -1994,7 +1996,7 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 	for _, email := range sortedKeys(present) {
 		arn := present[email]
 		if !slices.Contains(check.Emails, email) && strings.HasPrefix(arn, "arn:") {
-			if err := p.run("sns", "unsubscribe", nil, "--subscription-arn", arn); err != nil {
+			if err := p.runIn(awsAlarmRegion, "sns", "unsubscribe", nil, "--subscription-arn", arn); err != nil {
 				return err
 			}
 		}
@@ -2017,7 +2019,7 @@ func (p *AwsProvider) DeleteHealthCheck(check HealthCheck) error {
 		return err
 	}
 	if topic != "" {
-		if err := p.run("sns", "delete-topic", nil, "--topic-arn", topic); err != nil {
+		if err := p.runIn(awsAlarmRegion, "sns", "delete-topic", nil, "--topic-arn", topic); err != nil {
 			return err
 		}
 	}

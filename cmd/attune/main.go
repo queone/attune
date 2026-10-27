@@ -20,7 +20,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.11.0"
+	programVersion = "1.11.1"
 )
 
 var validKinds = []string{

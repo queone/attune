@@ -2,7 +2,7 @@
 
 ## Product Direction
 
-A declarative reconciler that keeps Azure DNS, groups, app registrations, roles, and resource groups matching YAML specs kept in an encrypted store, with the live provider as the only source of truth.
+A declarative reconciler that keeps cloud resources matching YAML specs kept in an encrypted store, with the live provider as the only source of truth. Each spec names its provider. `azure` holds DNS, groups, app registrations, roles, and resource groups; `aws` holds Route 53 DNS, a host of IAM role, bucket, firewall, instance, and static address, a cost budget, and an uptime check. Providers register their kinds through one registry so the core stays provider-neutral, and Cloudflare, Oracle Cloud, DigitalOcean, and others follow the same path.
 
 ## Ideas To Explore
 
@@ -11,4 +11,3 @@ Ideas captured for future reference. A bullet list — each line starts with `- 
 - IE2: Add Cloudflare as a DNS provider so a zone moved to Cloudflare's name servers for Cloudflare Tunnel (mud IE85) stays under attune: reconcile `dnsZone` and `dnsRecordSet` specs through the Cloudflare API with an API token from the keychain, keeping the Tunnel's public hostname as an ordinary CNAME to `<tunnel-id>.cfargotunnel.com` and leaving `cloudflared` itself outside attune.
 - IE7: Add `iamUser` and Identity Center assignments so the AWS account's sign-ins are declared too; wait for mud's decision to move from an access key to Identity Center.
 - IE9: Let a reference cross providers, such as an Azure record pointing at an AWS address, by ordering apply across providers; the two-pass flow covers it until then.
-- IE10: Give `healthCheck` a region of its own instead of `us-east-1`: AWS's advanced-mode accounts carry a region guardrail that reserves `us-east-1` for global services, IAM, Route 53, Budgets, STS, as AWS now recommends, and denies regional writes there, including `cloudwatch:PutMetricAlarm` and SNS, so the alarm and topic of a health check must land in a workload region such as `us-east-2` while the Route 53 check itself stays global; the metric the alarm reads is published only in `us-east-1`, so the design may need a CloudWatch Synthetics or a second-hand metric instead of the Route 53 one.

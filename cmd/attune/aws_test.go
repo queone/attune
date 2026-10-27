@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -780,7 +782,7 @@ func TestAwsCreatesBudgetAndHealthCheck(t *testing.T) {
 		"ec2 associate-address":                  {{out: `{}`}},
 	}
 	provider, cli := newAwsFake(recorded)
-	provider.region = "eu-west-1"
+	provider.region = "us-east-2"
 	grounded(t, provider)
 	options := &Options{Provider: "aws", PruneDNS: true}
 	changes, err := Plan(provider, awsMonitoringBundle(), options)
@@ -833,9 +835,10 @@ func TestAwsCreatesBudgetAndHealthCheck(t *testing.T) {
 		cli.argAfter(alarmCall, "--alarm-actions") != awsTopicARN || cli.argAfter(alarmCall, "--ok-actions") != awsTopicARN || !strings.Contains(cli.argAfter(alarmCall, "--dimensions"), "hc-new") {
 		t.Errorf("put-metric-alarm argv = %v", alarmCall)
 	}
-	if cli.argAfter(checkCall, "--region") != "eu-west-1" {
-		t.Errorf("create-health-check region = %q, want the configured eu-west-1", cli.argAfter(checkCall, "--region"))
+	if cli.argAfter(checkCall, "--region") != "us-east-2" {
+		t.Errorf("create-health-check region = %q, want the configured us-east-2", cli.argAfter(checkCall, "--region"))
 	}
+	alertChainStaysInAlarmRegion(t, cli, 0)
 	order := cli.pairs()
 	if slices.Index(order, "route53 create-health-check") < slices.Index(order, "ec2 associate-address") || slices.Index(order, "budgets create-budget") > slices.Index(order, "iam create-role") {
 		t.Errorf("call order = %v", order)
@@ -847,14 +850,17 @@ func TestAwsCreatesBudgetAndHealthCheck(t *testing.T) {
 // updates with diffs naming them, and apply swaps the notification and
 // updates the check.
 func TestAwsPlansMonitoringAgainstRecordedAccount(t *testing.T) {
-	provider, _ := newAwsFake(awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTPS", 3)))
+	provider, cli := newAwsFake(awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTPS", 3)))
+	provider.region = "us-east-2"
 	grounded(t, provider)
 	changes, err := Plan(provider, awsMonitoringBundle(), &Options{Provider: "aws", PruneDNS: true, PruneMonitoring: true})
 	if err != nil || len(changes) != 0 {
 		t.Fatalf("matching: changes=%v err=%v", changeKeys(changes), err)
 	}
+	alertChainStaysInAlarmRegion(t, cli, 0)
 	drifted := strings.Replace(awsBudgetNotifications, `"Threshold":80.0`, `"Threshold":70.0`, 1)
-	provider, cli := newAwsFake(awsFullAccountWithMonitoring(drifted, awsHealthCheckJSON("HTTPS", 2)))
+	provider, cli = newAwsFake(awsFullAccountWithMonitoring(drifted, awsHealthCheckJSON("HTTPS", 2)))
+	provider.region = "us-east-2"
 	grounded(t, provider)
 	options := &Options{Provider: "aws", PruneDNS: true}
 	changes, err = Plan(provider, awsMonitoringBundle(), options)
@@ -888,6 +894,7 @@ func TestAwsPlansMonitoringAgainstRecordedAccount(t *testing.T) {
 	if slices.Contains(mutations, "budgets update-budget") || slices.Contains(mutations, "sns subscribe") {
 		t.Errorf("unneeded mutations: %v", mutations)
 	}
+	alertChainStaysInAlarmRegion(t, cli, before)
 }
 
 // TestAwsHealthCheckProtocolChangeIsReplace — AT4: a live check on another
@@ -928,6 +935,7 @@ func TestAwsPrunesMonitoringOnlyWhenAsked(t *testing.T) {
 		}
 	}
 	provider, cli := newAwsFake(awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTPS", 3)))
+	provider.region = "us-east-2"
 	grounded(t, provider)
 	options := &Options{Provider: "aws", PruneDNS: true, PruneMonitoring: true}
 	changes, err = Plan(provider, other, options)
@@ -951,7 +959,7 @@ func TestAwsPrunesMonitoringOnlyWhenAsked(t *testing.T) {
 	for _, call := range cli.calls[before:] {
 		if !strings.HasPrefix(call[1], "describe") && !strings.HasPrefix(call[1], "list") {
 			mutations = append(mutations, call[0]+" "+call[1])
-			if call[0] == "cloudwatch" && cli.argAfter(call, "--region") != "us-east-1" {
+			if (call[0] == "cloudwatch" || call[0] == "sns") && cli.argAfter(call, "--region") != "us-east-1" {
 				t.Errorf("%s ran outside us-east-1: %v", call[1], call)
 			}
 		}
@@ -1168,5 +1176,41 @@ func TestAwsAddressWaitsForTheInstanceToRun(t *testing.T) {
 	provider.host().instanceIDs["example-host"] = "i-0new"
 	if _, err := provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"}); err == nil || !strings.Contains(err.Error(), "is terminated, not running") {
 		t.Errorf("terminated instance: %v", err)
+	}
+}
+
+// alertChainStaysInAlarmRegion asserts that every sns and cloudwatch call
+// recorded from index from onward carries --region us-east-1, whatever the
+// provider's configured region, since the Route 53 metric, the alarm, and
+// the topic it notifies must share that region.
+func alertChainStaysInAlarmRegion(t *testing.T, cli *fakeAwsCli, from int) {
+	t.Helper()
+	seen := 0
+	for _, call := range cli.calls[from:] {
+		if call[0] != "sns" && call[0] != "cloudwatch" {
+			continue
+		}
+		seen++
+		if region := cli.argAfter(call, "--region"); region != "us-east-1" {
+			t.Errorf("%s %s ran in %q, want us-east-1: %v", call[0], call[1], region, call)
+		}
+	}
+	if seen == 0 {
+		t.Errorf("no sns or cloudwatch call recorded from index %d", from)
+	}
+}
+
+// TestReadmeNamesHealthCheckGuardrailEntries — AT4: the README names the
+// four NotAction entries an organization's region guardrail needs for the
+// health check's alert chain in us-east-1.
+func TestReadmeNamesHealthCheckGuardrailEntries(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"`cloudwatch:PutMetricAlarm`", "`cloudwatch:DeleteAlarms`", "`cloudwatch:TagResource`", "`sns:*`"} {
+		if !strings.Contains(string(readme), want) {
+			t.Errorf("README lacks %s", want)
+		}
 	}
 }

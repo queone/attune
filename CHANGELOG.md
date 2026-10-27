@@ -3,6 +3,7 @@
 | Version | Summary |
 |---------|---------|
 | Unreleased | |
+| 1.11.1 | AC10: attune v1.11.1 moves the health check topic to us-east-1, fixes AWS docs |
 | 1.11.0 | attune v1.11.0 warns on us-east-1 hosts and documents the AWS account shape |
 | 1.10.2 | attune v1.10.2 waits for a new instance to run before attaching its address |
 | 1.10.1 | AC9: attune v1.10.1 finds AWS resources by family and retries a racing launch |
