@@ -295,7 +295,7 @@ func TestPublicExampleContainsOnlySafeDocumentationValues(t *testing.T) {
 				continue
 			}
 			for _, word := range []string{"password", "secret", "token", "credential"} {
-				if strings.Contains(name, word) && strings.TrimSpace(value) != "" {
+				if strings.Contains(name, word) && strings.TrimSpace(value) != "" && strings.TrimSpace(value) != "true" && strings.TrimSpace(value) != "false" {
 					t.Errorf("%s: secret-shaped assignment %q", path, line)
 				}
 			}
@@ -768,5 +768,37 @@ func TestValidateStaysQuietForWorkloadRegion(t *testing.T) {
 	}
 	if code, _, errs := validateSyntheticSpec(t, "provider: aws\nkind: bucket\nname: backups\nregion: us-east-2\nencryption: aes256\n"); code != 0 || errs != "" {
 		t.Fatalf("bucket: code=%d stderr=%q, want silence", code, errs)
+	}
+}
+
+// TestAzureDocAndExampleCoverSignInFields — AT6: the azure provider doc
+// names every sign-in field, and the example registration declares them.
+func TestAzureDocAndExampleCoverSignInFields(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "azure.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	example, err := os.ReadFile(filepath.Join(publicExampleRoot, "specs", "app-registration.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"redirectUris", "signInAudience", "idTokenIssuance", "secrets", "tenant", "issuedAfter", "validForDays"} {
+		if !strings.Contains(string(doc), "`"+want+"`") {
+			t.Errorf("docs/azure.md lacks `%s`", want)
+		}
+		if want != "tenant" && !strings.Contains(string(example), want+":") {
+			t.Errorf("example lacks %s", want)
+		}
+	}
+}
+
+// TestDiagnosticLineListsOtherTenants — AT5: the diagnostic suffix names
+// the signed-in tenant and each other tenant only when one is declared.
+func TestDiagnosticLineListsOtherTenants(t *testing.T) {
+	if got := tenantsSuffix("home", nil); got != "" {
+		t.Errorf("no other tenants: %q", got)
+	}
+	if got := tenantsSuffix("home", []string{"a", "b"}); got != " tenants=home,a,b" {
+		t.Errorf("suffix = %q", got)
 	}
 }

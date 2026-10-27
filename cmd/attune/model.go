@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 )
 
 // DnsRecord is a provider-neutral DNS record set. Provider names the
@@ -55,13 +57,62 @@ type SecurityGroup struct {
 	Members  []string
 }
 
-// AppRegistration is an application registration.
+// AppRegistration is an application registration. Tenant names the
+// directory it lives in; empty means the signed-in tenant. SignInAudience,
+// RedirectURIs, IDTokenIssuance, and Secrets are unmanaged when unset
+// (empty, nil, nil, nil): neither sent nor compared.
 type AppRegistration struct {
 	Provider         string
 	Name             string
 	Owners           []string
 	ServicePrincipal bool
+	Tenant           string
+	SignInAudience   string
+	RedirectURIs     []string
+	IDTokenIssuance  *bool
+	Secrets          []Secret
 }
+
+// Tenants lists, sorted, every tenant an app registration names other
+// than the signed-in one.
+func (b *Bundle) Tenants() []string {
+	var tenants []string
+	for _, app := range b.Apps {
+		if app.Tenant != "" && !slices.Contains(tenants, app.Tenant) {
+			tenants = append(tenants, app.Tenant)
+		}
+	}
+	sort.Strings(tenants)
+	return tenants
+}
+
+// Key is the change key: the name, with @tenant appended outside the
+// signed-in tenant.
+func (a AppRegistration) Key() string {
+	if a.Tenant == "" {
+		return "appRegistration|" + a.Name
+	}
+	return "appRegistration|" + a.Name + "@" + a.Tenant
+}
+
+// Secret is one client secret of an app registration, identified by its
+// display name. ValidForDays and IssuedAfter come from the spec; KeyID,
+// Issued, and Expires describe the live credential.
+type Secret struct {
+	Name         string
+	ValidForDays int
+	IssuedAfter  time.Time
+	KeyID        string
+	Issued       time.Time
+	Expires      time.Time
+}
+
+// signInAudiences is every value Graph accepts for signInAudience.
+var signInAudiences = []string{"AzureADMyOrg", "AzureADMultipleOrgs", "AzureADandPersonalMicrosoftAccount", "PersonalMicrosoftAccount"}
+
+// secretMaxDays is the longest life a secret may be given, the portal's
+// two-year maximum and Graph's default.
+const secretMaxDays = 730
 
 // Scope is an Azure RBAC scope.
 type Scope struct {

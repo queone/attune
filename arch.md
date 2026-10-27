@@ -51,6 +51,9 @@ Integrated audit adoption is the only command-mediated phase exception. It can a
 - Each provider owns its credential source and allowlist. The Azure provider authenticates through the local `az` CLI and never keeps its own credential store. The AWS provider drives the local `aws` CLI as its only credential source and transport, through an exact allowlist of `<service> <operation>` pairs, and reduces a failing call to its command and exit status.
 - It writes no local state, cache, or telemetry beyond its store, the remembered store path, `render` output, and `edit`'s private temporary file.
 - The Azure provider restricts requests to an ARM and Graph origin allowlist, and non-2xx response bodies are redacted wholesale before any diagnostic or error message.
+- An `appRegistration` may live in another tenant; the Azure provider keeps one Graph token per tenant, taken lazily
+  through the `az` CLI. A client secret's value exists only in the one Graph response that creates it: attune prints it
+  on the applied line and never stores it, so rotation is declarative, by expiry or by the spec's `issuedAfter`.
 - Role-assignment and role-definition IDs are derived deterministically (SHA1-based UUIDv5), to stay stable across repeated `apply` runs and compatible with resources that rkit's attune created.
 - The store is lockbox's sealed SQLite file with its own key under the `attune` Keychain service. Its file starts with the `MACFIT` format tag, which must not change.
 - DNS pruning defaults on. Identity, role, resource-group, host, and monitoring pruning default off.

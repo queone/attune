@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -29,10 +30,12 @@ type Account struct {
 	Identity     string
 }
 
-// AzureCli authenticates against Azure via the local `az` CLI.
+// AzureCli authenticates against Azure via the local `az` CLI. Token's
+// tenant names another directory than the signed-in one; empty means the
+// signed-in tenant.
 type AzureCli interface {
 	Account() (Account, error)
-	Token(resource string) (string, error)
+	Token(resource, tenant string) (string, error)
 }
 
 // CommandAzureCli shells out to the `az` CLI for account/token lookups.
@@ -60,11 +63,16 @@ func (CommandAzureCli) Account() (Account, error) {
 	}, nil
 }
 
-func (CommandAzureCli) Token(resource string) (string, error) {
-	out, err := exec.Command("az", "account", "get-access-token",
-		"--resource", resource, "--query", "accessToken", "--output", "tsv").Output()
+func (CommandAzureCli) Token(resource, tenant string) (string, error) {
+	args := []string{"account", "get-access-token", "--resource", resource, "--query", "accessToken", "--output", "tsv"}
+	login := "az login"
+	if tenant != "" {
+		args = append(args, "--tenant", tenant)
+		login = "az login --tenant " + tenant
+	}
+	out, err := exec.Command("az", args...).Output()
 	if err != nil {
-		return "", fmt.Errorf("run Azure CLI token lookup: %w; run `az login` and retry", err)
+		return "", fmt.Errorf("run Azure CLI token lookup: %w; run `%s` and retry", err, login)
 	}
 	token := strings.TrimSpace(string(out))
 	if token == "" {
@@ -127,10 +135,19 @@ type AzureProvider struct {
 	Subscription  string
 	resourceGroup string
 	account       Account
-	graphToken    string
-	graphTokenSet bool
+	graphTokens   map[string]string
+	tenant        string
+	appIDs        map[string]string
 	armToken      string
 	armTokenSet   bool
+}
+
+// in makes Graph calls use tenant until the returned func runs; empty
+// restores the signed-in tenant.
+func (p *AzureProvider) in(tenant string) func() {
+	previous := p.tenant
+	p.tenant = tenant
+	return func() { p.tenant = previous }
 }
 
 var (
@@ -205,17 +222,22 @@ func (p *AzureProvider) send(method, url string, body any) (*HTTPResponse, error
 	}
 	var token string
 	if graph {
-		if !p.graphTokenSet {
-			t, err := p.cli.Token("https://graph.microsoft.com")
+		if p.graphTokens == nil {
+			p.graphTokens = map[string]string{}
+		}
+		t, ok := p.graphTokens[p.tenant]
+		if !ok {
+			fresh, err := p.cli.Token("https://graph.microsoft.com", p.tenant)
 			if err != nil {
 				return nil, err
 			}
-			p.graphToken, p.graphTokenSet = t, true
+			t = fresh
+			p.graphTokens[p.tenant] = t
 		}
-		token = p.graphToken
+		token = t
 	} else {
 		if !p.armTokenSet {
-			t, err := p.cli.Token("https://management.azure.com")
+			t, err := p.cli.Token("https://management.azure.com", "")
 			if err != nil {
 				return nil, err
 			}
@@ -547,9 +569,13 @@ func (p *AzureProvider) DeleteGroup(name string) error {
 	return err
 }
 
-func (p *AzureProvider) GetApp(name string) (*AppRegistration, error) {
+// GetApp reads one app registration by display name in tenant: owners,
+// service principal, sign-in settings, and the names and dates of its
+// client secrets, never their values.
+func (p *AzureProvider) GetApp(tenant, name string) (*AppRegistration, error) {
+	defer p.in(tenant)()
 	filter := percentEncode(fmt.Sprintf("displayName eq '%s'", name))
-	result, err := p.request("GET", fmt.Sprintf("%s/applications?$select=id,appId&$filter=%s", graphBase, filter), nil)
+	result, err := p.request("GET", fmt.Sprintf("%s/applications?$select=id,appId,signInAudience,web,passwordCredentials&$filter=%s", graphBase, filter), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +595,108 @@ func (p *AzureProvider) GetApp(name string) (*AppRegistration, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &AppRegistration{Name: name, Owners: owners, ServicePrincipal: exists}, nil
+	app := &AppRegistration{Name: name, Tenant: tenant, Owners: owners, ServicePrincipal: exists, SignInAudience: jsonString(item, "signInAudience")}
+	web, _ := item["web"].(map[string]any)
+	app.RedirectURIs = jsonStrings(web, "redirectUris")
+	if app.RedirectURIs == nil {
+		app.RedirectURIs = []string{}
+	}
+	idTokens := false
+	if grant, ok := web["implicitGrantSettings"].(map[string]any); ok {
+		idTokens, _ = grant["enableIdTokenIssuance"].(bool)
+	}
+	app.IDTokenIssuance = &idTokens
+	app.Secrets = []Secret{}
+	credentials, _ := item["passwordCredentials"].([]any)
+	for _, raw := range credentials {
+		credential, _ := raw.(map[string]any)
+		secret := Secret{Name: jsonString(credential, "displayName"), KeyID: jsonString(credential, "keyId")}
+		secret.Issued, _ = time.Parse(time.RFC3339, jsonString(credential, "startDateTime"))
+		secret.Expires, _ = time.Parse(time.RFC3339, jsonString(credential, "endDateTime"))
+		app.Secrets = append(app.Secrets, secret)
+	}
+	return app, nil
+}
+
+// signInPayload renders the managed sign-in fields of app as a Graph
+// application body, or nil when none is set.
+func signInPayload(app AppRegistration) map[string]any {
+	body := map[string]any{}
+	if app.SignInAudience != "" {
+		body["signInAudience"] = app.SignInAudience
+	}
+	web := map[string]any{}
+	if app.RedirectURIs != nil {
+		web["redirectUris"] = app.RedirectURIs
+	}
+	if app.IDTokenIssuance != nil {
+		web["implicitGrantSettings"] = map[string]any{"enableIdTokenIssuance": *app.IDTokenIssuance}
+	}
+	if len(web) > 0 {
+		body["web"] = web
+	}
+	if len(body) == 0 {
+		return nil
+	}
+	return body
+}
+
+// rememberAppID keeps the object id PutApp saw for app, so a secret added
+// in the same run as the create needs no display-name lookup, which Graph
+// can lag on.
+func (p *AzureProvider) rememberAppID(app AppRegistration, id string) {
+	if p.appIDs == nil {
+		p.appIDs = map[string]string{}
+	}
+	p.appIDs[app.Key()] = id
+}
+
+// appID returns app's object id, from PutApp's memory of this run or by
+// display name.
+func (p *AzureProvider) appID(app AppRegistration) (string, error) {
+	if id, ok := p.appIDs[app.Key()]; ok {
+		return id, nil
+	}
+	return p.findID("applications", "displayName", app.Name)
+}
+
+// AddAppSecret adds a client secret named secret.Name to app, valid for
+// secret.ValidForDays from now, and returns the value Graph discloses on
+// this one response and never again.
+func (p *AzureProvider) AddAppSecret(app AppRegistration, secret Secret) (string, error) {
+	defer p.in(app.Tenant)()
+	id, err := p.appID(app)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return "", fmt.Errorf("app registration %q is missing; apply its create first", app.Name)
+	}
+	expires := now().UTC().AddDate(0, 0, secret.ValidForDays).Format(time.RFC3339)
+	result, err := p.request("POST", fmt.Sprintf("%s/applications/%s/addPassword", graphBase, id),
+		map[string]any{"passwordCredential": map[string]any{"displayName": secret.Name, "endDateTime": expires}})
+	if err != nil {
+		return "", err
+	}
+	value := jsonString(result, "secretText")
+	if value == "" {
+		return "", fmt.Errorf("provider returned no secret value for %q", secret.Name)
+	}
+	return value, nil
+}
+
+// RemoveAppSecret removes the client secret with keyID from app.
+func (p *AzureProvider) RemoveAppSecret(app AppRegistration, keyID string) error {
+	defer p.in(app.Tenant)()
+	id, err := p.appID(app)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return nil
+	}
+	_, err = p.request("POST", fmt.Sprintf("%s/applications/%s/removePassword", graphBase, id), map[string]any{"keyId": keyID})
+	return err
 }
 
 func (p *AzureProvider) servicePrincipalExists(appID string) (bool, error) {
@@ -583,11 +710,16 @@ func (p *AzureProvider) servicePrincipalExists(appID string) (bool, error) {
 	return ok && len(items) > 0, nil
 }
 
-func (p *AzureProvider) ListAppNames() ([]string, error) {
+func (p *AzureProvider) ListAppNames(tenant string) ([]string, error) {
+	defer p.in(tenant)()
 	return p.listNames("applications")
 }
 
+// PutApp creates or updates app in its tenant: the managed sign-in fields
+// go in the create body or one PATCH, then owners and the service
+// principal are synced. Secrets are separate changes.
 func (p *AzureProvider) PutApp(app AppRegistration) error {
+	defer p.in(app.Tenant)()
 	filter := percentEncode(fmt.Sprintf("displayName eq '%s'", app.Name))
 	found, err := p.request("GET", fmt.Sprintf("%s/applications?$select=id,appId&$filter=%s", graphBase, filter), nil)
 	if err != nil {
@@ -596,16 +728,26 @@ func (p *AzureProvider) PutApp(app AppRegistration) error {
 	obj, _ := found.(map[string]any)
 	items, _ := obj["value"].([]any)
 	var id, appID string
+	signIn := signInPayload(app)
 	if len(items) > 0 {
 		item, _ := items[0].(map[string]any)
 		id, appID = jsonString(item, "id"), jsonString(item, "appId")
+		p.rememberAppID(app, id)
+		if signIn != nil {
+			if _, err := p.request("PATCH", fmt.Sprintf("%s/applications/%s", graphBase, id), signIn); err != nil {
+				return err
+			}
+		}
 	} else {
-		created, err := p.request("POST", graphBase+"/applications", map[string]any{"displayName": app.Name})
+		body := map[string]any{"displayName": app.Name}
+		maps.Copy(body, signIn)
+		created, err := p.request("POST", graphBase+"/applications", body)
 		if err != nil {
 			return err
 		}
 		createdObj, _ := created.(map[string]any)
 		id, appID = jsonString(createdObj, "id"), jsonString(createdObj, "appId")
+		p.rememberAppID(app, id)
 	}
 	if err := p.syncRefs(fmt.Sprintf("/applications/%s/owners", id), app.Owners); err != nil {
 		return err
@@ -624,7 +766,8 @@ func (p *AzureProvider) PutApp(app AppRegistration) error {
 	return nil
 }
 
-func (p *AzureProvider) DeleteApp(name string) error {
+func (p *AzureProvider) DeleteApp(tenant, name string) error {
+	defer p.in(tenant)()
 	id, err := p.findID("applications", "displayName", name)
 	if err != nil {
 		return err

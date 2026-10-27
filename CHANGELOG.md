@@ -3,6 +3,7 @@
 | Version | Summary |
 |---------|---------|
 | Unreleased | |
+| 1.12.0 | AC11: attune v1.12.0 app registrations gain sign-in fields, secrets, a tenant |
 | 1.11.2 | attune v1.11.2 splits the README into docs per provider and adds a Why section |
 | 1.11.1 | AC10: attune v1.11.1 moves the health check topic to us-east-1, fixes AWS docs |
 | 1.11.0 | attune v1.11.0 warns on us-east-1 hosts and documents the AWS account shape |

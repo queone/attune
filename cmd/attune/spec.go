@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -379,24 +381,12 @@ func loadSpecInto(bundle *Bundle, kind, provider string, m map[string]any) (stri
 		return "securityGroup|" + item.Name, nil
 
 	case "appRegistration":
-		if err := rejectUnknown(m, []string{"kind", "provider", "name", "owners", "servicePrincipal"}, ""); err != nil {
-			return "", err
-		}
-		name, err := requiredString(m, "name")
+		item, err := parseAppRegistration(m, provider)
 		if err != nil {
 			return "", err
 		}
-		owners, err := optionalStrings(m, "owners")
-		if err != nil {
-			return "", err
-		}
-		servicePrincipal, err := optionalBool(m, "servicePrincipal")
-		if err != nil {
-			return "", err
-		}
-		item := AppRegistration{Provider: provider, Name: name, Owners: owners, ServicePrincipal: servicePrincipal != nil && *servicePrincipal}
 		bundle.Apps = append(bundle.Apps, item)
-		return "appRegistration|" + item.Name, nil
+		return item.Key(), nil
 
 	case "roleDefinition":
 		if err := rejectUnknown(m, []string{"kind", "provider", "name", "description", "assignableScopes", "actions", "notActions", "dataActions", "notDataActions"}, ""); err != nil {
@@ -885,4 +875,150 @@ func isAddressOrReference(target string) bool {
 		}
 	}
 	return true
+}
+
+// parseAppRegistration parses one appRegistration spec. The sign-in fields
+// and secrets are optional and unmanaged when absent; tenant names another
+// directory than the signed-in one.
+func parseAppRegistration(m map[string]any, provider string) (AppRegistration, error) {
+	allowed := []string{"kind", "provider", "name", "owners", "servicePrincipal", "tenant", "signInAudience", "redirectUris", "idTokenIssuance", "secrets"}
+	if err := rejectUnknown(m, allowed, ""); err != nil {
+		return AppRegistration{}, err
+	}
+	name, err := requiredString(m, "name")
+	if err != nil {
+		return AppRegistration{}, err
+	}
+	owners, err := optionalStrings(m, "owners")
+	if err != nil {
+		return AppRegistration{}, err
+	}
+	servicePrincipal, err := optionalBool(m, "servicePrincipal")
+	if err != nil {
+		return AppRegistration{}, err
+	}
+	tenant, err := optionalString(m, "tenant")
+	if err != nil {
+		return AppRegistration{}, err
+	}
+	audience, err := optionalString(m, "signInAudience")
+	if err != nil {
+		return AppRegistration{}, err
+	}
+	if audience != "" && !slices.Contains(signInAudiences, audience) {
+		return AppRegistration{}, fmt.Errorf("signInAudience must be one of %s", strings.Join(signInAudiences, ", "))
+	}
+	uris, err := optionalStrings(m, "redirectUris")
+	if err != nil {
+		return AppRegistration{}, err
+	}
+	for _, uri := range uris {
+		if !isRedirectURI(uri) {
+			return AppRegistration{}, fmt.Errorf("redirectUris entry %q must be an absolute https:// URL or http://localhost", uri)
+		}
+	}
+	idTokens, err := optionalBool(m, "idTokenIssuance")
+	if err != nil {
+		return AppRegistration{}, err
+	}
+	secrets, err := optionalSecrets(m, "secrets")
+	if err != nil {
+		return AppRegistration{}, err
+	}
+	return AppRegistration{
+		Provider:         provider,
+		Name:             name,
+		Owners:           owners,
+		ServicePrincipal: servicePrincipal != nil && *servicePrincipal,
+		Tenant:           tenant,
+		SignInAudience:   audience,
+		RedirectURIs:     uris,
+		IDTokenIssuance:  idTokens,
+		Secrets:          secrets,
+	}, nil
+}
+
+// isRedirectURI accepts an absolute https:// URL, or http://localhost with
+// any port and path, as a web redirect URI.
+func isRedirectURI(value string) bool {
+	u, err := url.Parse(value)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		return u.Hostname() == "localhost"
+	}
+	return false
+}
+
+// optionalSecrets parses the secrets list: nil when absent, a non-nil list
+// otherwise. Each entry needs a unique name; validForDays defaults to the
+// two-year maximum, and issuedAfter is a date or RFC 3339 time (YAML
+// reads a bare date as a timestamp) before which a live credential counts
+// as stale.
+func optionalSecrets(m map[string]any, name string) ([]Secret, error) {
+	v, ok := m[name]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	items, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a list", name)
+	}
+	out := make([]Secret, 0, len(items))
+	seen := map[string]bool{}
+	for i, item := range items {
+		entry, err := mapping(item, fmt.Sprintf("%s[%d]", name, i))
+		if err != nil {
+			return nil, err
+		}
+		if err := rejectUnknown(entry, []string{"name", "validForDays", "issuedAfter"}, fmt.Sprintf("%s[%d]", name, i)); err != nil {
+			return nil, err
+		}
+		secretName, err := requiredString(entry, "name")
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d]: %w", name, i, err)
+		}
+		if seen[secretName] {
+			return nil, fmt.Errorf("%s names %q twice", name, secretName)
+		}
+		seen[secretName] = true
+		secret := Secret{Name: secretName, ValidForDays: secretMaxDays}
+		if _, ok := entry["validForDays"]; ok {
+			days, err := requiredI64(entry, "validForDays")
+			if err != nil {
+				return nil, fmt.Errorf("%s %q: %w", name, secretName, err)
+			}
+			if days < 1 || days > secretMaxDays {
+				return nil, fmt.Errorf("%s %q validForDays must be between 1 and %d", name, secretName, secretMaxDays)
+			}
+			secret.ValidForDays = int(days)
+		}
+		switch after := entry["issuedAfter"].(type) {
+		case nil:
+		case time.Time:
+			secret.IssuedAfter = after.UTC()
+		case string:
+			t, err := parseTime(after)
+			if err != nil {
+				return nil, fmt.Errorf("%s %q issuedAfter must be a date (2006-01-02) or an RFC 3339 time", name, secretName)
+			}
+			secret.IssuedAfter = t
+		default:
+			return nil, fmt.Errorf("%s %q issuedAfter must be a date (2006-01-02) or an RFC 3339 time", name, secretName)
+		}
+		out = append(out, secret)
+	}
+	return out, nil
+}
+
+// parseTime accepts a date or an RFC 3339 time, both read as UTC.
+func parseTime(value string) (time.Time, error) {
+	if t, err := time.Parse("2006-01-02", value); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, value)
 }

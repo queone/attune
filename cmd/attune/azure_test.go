@@ -1,15 +1,19 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 type syntheticCli struct{}
 
-func (syntheticCli) Account() (Account, error)    { return Account{}, nil }
-func (syntheticCli) Token(string) (string, error) { return "synthetic-token", nil }
+func (syntheticCli) Account() (Account, error)            { return Account{}, nil }
+func (syntheticCli) Token(string, string) (string, error) { return "synthetic-token", nil }
 
 // syntheticTransport records every request URL (and, when requests is set,
 // the full request for header/method inspection) and returns queued
@@ -313,5 +317,233 @@ func TestHasZoneMapsStatusesWithoutLeakingBodies(t *testing.T) {
 		if exists != c.exists {
 			t.Errorf("%s: exists = %v, want %v", c.name, exists, c.exists)
 		}
+	}
+}
+
+// tenantCli records the tenant each token request names and fails for a
+// tenant it was told to refuse.
+type tenantCli struct {
+	tenants *[]string
+	refuse  string
+}
+
+func (tenantCli) Account() (Account, error) { return Account{Tenant: "home"}, nil }
+func (c tenantCli) Token(_, tenant string) (string, error) {
+	*c.tenants = append(*c.tenants, tenant)
+	if tenant != "" && tenant == c.refuse {
+		return "", fmt.Errorf("run Azure CLI token lookup: exit 1; run `az login --tenant %s` and retry", tenant)
+	}
+	return "token-" + tenant, nil
+}
+
+const liveAppJSON = `{"value":[{"id":"app-object","appId":"app-client","signInAudience":"AzureADMultipleOrgs",
+"web":{"redirectUris":["https://example.com/cb"],"implicitGrantSettings":{"enableIdTokenIssuance":true}},
+"passwordCredentials":[{"keyId":"k1","displayName":"host","startDateTime":"2026-01-01T00:00:00Z","endDateTime":"2027-01-01T00:00:00Z"}]}]}`
+
+// TestGetAppReadsSignInFieldsAndSecretNames — AT4: the lookup selects the
+// sign-in fields and credentials, and returns their names and dates
+// without any value.
+func TestGetAppReadsSignInFieldsAndSecretNames(t *testing.T) {
+	var urls []string
+	transport := &syntheticTransport{urls: &urls, responses: []*HTTPResponse{
+		{Status: 200, Body: []byte(liveAppJSON)},
+		{Status: 200, Body: []byte(`{"value":[]}`)},
+	}}
+	provider := NewAzureProviderWith(syntheticCli{}, transport, "", "")
+	app, err := provider.GetApp("", "site")
+	if err != nil {
+		t.Fatalf("GetApp: %v", err)
+	}
+	if !strings.Contains(urls[0], "$select=id,appId,signInAudience,web,passwordCredentials") {
+		t.Errorf("lookup URL = %s", urls[0])
+	}
+	if app.SignInAudience != "AzureADMultipleOrgs" || len(app.RedirectURIs) != 1 || app.IDTokenIssuance == nil || !*app.IDTokenIssuance {
+		t.Errorf("app = %+v", app)
+	}
+	if len(app.Secrets) != 1 || app.Secrets[0].Name != "host" || app.Secrets[0].KeyID != "k1" || app.Secrets[0].Expires.Year() != 2027 || app.Secrets[0].Issued.Year() != 2026 {
+		t.Errorf("secrets = %+v", app.Secrets)
+	}
+}
+
+// TestPutAppSendsSignInPayloadOnCreateAndUpdate — AT4: a create carries the
+// managed fields in its body, an update PATCHes them, and an app with no
+// managed field sends no PATCH.
+func TestPutAppSendsSignInPayloadOnCreateAndUpdate(t *testing.T) {
+	audience := "AzureADMyOrg"
+	app := AppRegistration{Name: "site", SignInAudience: audience, RedirectURIs: []string{"https://example.com/cb"}, IDTokenIssuance: new(true)}
+	bodyOf := func(req *HTTPRequest) map[string]any {
+		var body map[string]any
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		return body
+	}
+	checkPayload := func(body map[string]any) {
+		web, _ := body["web"].(map[string]any)
+		grant, _ := web["implicitGrantSettings"].(map[string]any)
+		if body["signInAudience"] != audience || grant["enableIdTokenIssuance"] != true {
+			t.Errorf("payload = %v", body)
+		}
+		if uris, _ := web["redirectUris"].([]any); len(uris) != 1 || uris[0] != "https://example.com/cb" {
+			t.Errorf("redirectUris = %v", web["redirectUris"])
+		}
+	}
+
+	var urls []string
+	var requests []*HTTPRequest
+	transport := &syntheticTransport{urls: &urls, requests: &requests, responses: []*HTTPResponse{
+		{Status: 200, Body: []byte(`{"value":[]}`)},
+		{Status: 201, Body: []byte(`{"id":"app-object","appId":"app-client"}`)},
+		{Status: 200, Body: []byte(`{"value":[]}`)},
+	}}
+	provider := NewAzureProviderWith(syntheticCli{}, transport, "", "")
+	if err := provider.PutApp(app); err != nil {
+		t.Fatalf("PutApp create: %v", err)
+	}
+	if requests[1].Method != "POST" || !strings.HasSuffix(requests[1].URL, "/applications") {
+		t.Fatalf("second request = %s %s", requests[1].Method, requests[1].URL)
+	}
+	created := bodyOf(requests[1])
+	if created["displayName"] != "site" {
+		t.Errorf("create body = %v", created)
+	}
+	checkPayload(created)
+
+	urls, requests = nil, nil
+	transport = &syntheticTransport{urls: &urls, requests: &requests, responses: []*HTTPResponse{
+		{Status: 200, Body: []byte(`{"value":[{"id":"app-object","appId":"app-client"}]}`)},
+		{Status: 204},
+		{Status: 200, Body: []byte(`{"value":[]}`)},
+	}}
+	provider = NewAzureProviderWith(syntheticCli{}, transport, "", "")
+	if err := provider.PutApp(app); err != nil {
+		t.Fatalf("PutApp update: %v", err)
+	}
+	if requests[1].Method != "PATCH" || !strings.HasSuffix(requests[1].URL, "/applications/app-object") {
+		t.Fatalf("second request = %s %s", requests[1].Method, requests[1].URL)
+	}
+	checkPayload(bodyOf(requests[1]))
+
+	urls, requests = nil, nil
+	transport = &syntheticTransport{urls: &urls, requests: &requests, responses: []*HTTPResponse{
+		{Status: 200, Body: []byte(`{"value":[{"id":"app-object","appId":"app-client"}]}`)},
+		{Status: 200, Body: []byte(`{"value":[]}`)},
+	}}
+	provider = NewAzureProviderWith(syntheticCli{}, transport, "", "")
+	if err := provider.PutApp(AppRegistration{Name: "site"}); err != nil {
+		t.Fatalf("PutApp bare: %v", err)
+	}
+	for _, req := range requests {
+		if req.Method == "PATCH" {
+			t.Errorf("bare app sent a PATCH: %s", req.URL)
+		}
+	}
+}
+
+// TestAppSecretsAddAndRemoveThroughGraph — AT4: adding a secret posts
+// addPassword with the display name and an expiry validForDays from now
+// and returns the one-time value; removing posts removePassword with the
+// key id.
+func TestAppSecretsAddAndRemoveThroughGraph(t *testing.T) {
+	restore := now
+	now = func() time.Time { return time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC) }
+	defer func() { now = restore }()
+	var urls []string
+	var requests []*HTTPRequest
+	transport := &syntheticTransport{urls: &urls, requests: &requests, responses: []*HTTPResponse{
+		{Status: 200, Body: []byte(`{"value":[{"id":"app-object"}]}`)},
+		{Status: 200, Body: []byte(`{"keyId":"k2","secretText":"one-time-value"}`)},
+		{Status: 200, Body: []byte(`{"value":[{"id":"app-object"}]}`)},
+		{Status: 204},
+	}}
+	provider := NewAzureProviderWith(syntheticCli{}, transport, "", "")
+	value, err := provider.AddAppSecret(AppRegistration{Name: "site"}, Secret{Name: "host", ValidForDays: 30})
+	if err != nil {
+		t.Fatalf("AddAppSecret: %v", err)
+	}
+	if value != "one-time-value" {
+		t.Errorf("value = %q", value)
+	}
+	if requests[1].Method != "POST" || !strings.HasSuffix(requests[1].URL, "/applications/app-object/addPassword") {
+		t.Fatalf("add request = %s %s", requests[1].Method, requests[1].URL)
+	}
+	want := `{"passwordCredential":{"displayName":"host","endDateTime":"2026-11-26T12:00:00Z"}}`
+	if string(requests[1].Body) != want {
+		t.Errorf("add body = %s, want %s", requests[1].Body, want)
+	}
+	if err := provider.RemoveAppSecret(AppRegistration{Name: "site"}, "k1"); err != nil {
+		t.Fatalf("RemoveAppSecret: %v", err)
+	}
+	if !strings.HasSuffix(requests[3].URL, "/applications/app-object/removePassword") || string(requests[3].Body) != `{"keyId":"k1"}` {
+		t.Errorf("remove request = %s %s", requests[3].URL, requests[3].Body)
+	}
+
+	// A secret added right after PutApp created the registration reuses the
+	// id from the create response instead of a display-name lookup.
+	urls, requests = nil, nil
+	transport = &syntheticTransport{urls: &urls, requests: &requests, responses: []*HTTPResponse{
+		{Status: 200, Body: []byte(`{"value":[]}`)},
+		{Status: 201, Body: []byte(`{"id":"fresh-object","appId":"fresh-client"}`)},
+		{Status: 200, Body: []byte(`{"value":[]}`)},
+		{Status: 200, Body: []byte(`{"keyId":"k3","secretText":"fresh-value"}`)},
+	}}
+	provider = NewAzureProviderWith(syntheticCli{}, transport, "", "")
+	if err := provider.PutApp(AppRegistration{Name: "fresh"}); err != nil {
+		t.Fatalf("PutApp: %v", err)
+	}
+	if _, err := provider.AddAppSecret(AppRegistration{Name: "fresh"}, Secret{Name: "host", ValidForDays: 30}); err != nil {
+		t.Fatalf("AddAppSecret after create: %v", err)
+	}
+	last := requests[len(requests)-1]
+	if !strings.HasSuffix(last.URL, "/applications/fresh-object/addPassword") {
+		t.Errorf("add after create = %s", last.URL)
+	}
+	for _, u := range urls[3:] {
+		if strings.Contains(u, "displayName%20eq") || strings.Contains(u, "displayName eq") {
+			t.Errorf("add after create looked the app up by name: %s", u)
+		}
+	}
+}
+
+// TestAppCallsInAnotherTenantUseThatTenantsToken — AT5: a lookup in another
+// tenant requests a Graph token for it, a refused tenant fails with the
+// az login guidance before any request, and the signed-in tenant's calls
+// keep their own token.
+func TestAppCallsInAnotherTenantUseThatTenantsToken(t *testing.T) {
+	other := "22222222-2222-2222-2222-222222222222"
+	var tenants []string
+	var urls []string
+	var requests []*HTTPRequest
+	transport := &syntheticTransport{urls: &urls, requests: &requests, responses: []*HTTPResponse{{Status: 200, Body: []byte(`{"value":[]}`)}}}
+	provider := NewAzureProviderWith(tenantCli{tenants: &tenants}, transport, "", "")
+	if _, err := provider.GetApp(other, "consumer"); err != nil {
+		t.Fatalf("GetApp: %v", err)
+	}
+	if _, err := provider.GetApp("", "home"); err != nil {
+		t.Fatalf("GetApp home: %v", err)
+	}
+	if !slices.Equal(tenants, []string{other, ""}) {
+		t.Errorf("token tenants = %v", tenants)
+	}
+	auth := func(i int) string {
+		for _, h := range requests[i].Headers {
+			if h[0] == "Authorization" {
+				return h[1]
+			}
+		}
+		return ""
+	}
+	if auth(0) != "Bearer token-"+other || auth(1) != "Bearer token-" {
+		t.Errorf("authorization = %q, %q", auth(0), auth(1))
+	}
+
+	urls, requests, tenants = nil, nil, nil
+	provider = NewAzureProviderWith(tenantCli{tenants: &tenants, refuse: other}, &syntheticTransport{urls: &urls, requests: &requests}, "", "")
+	_, err := provider.ListAppNames(other)
+	if err == nil || !strings.Contains(err.Error(), "az login --tenant "+other) {
+		t.Errorf("refused tenant: got %v", err)
+	}
+	if len(requests) != 0 {
+		t.Errorf("a request was sent without a token: %v", urls)
 	}
 }

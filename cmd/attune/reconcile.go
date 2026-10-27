@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Action is the reconciliation action for one Change.
@@ -43,6 +45,7 @@ const (
 	TargetZone
 	TargetGroup
 	TargetApp
+	TargetAppSecret
 	TargetRoleDefinition
 	TargetRoleAssignment
 	TargetResourceGroup
@@ -70,6 +73,8 @@ type Target struct {
 	Dns            DnsRecord
 	Group          SecurityGroup
 	App            AppRegistration
+	Secret         Secret
+	Stale          []string
 	RoleDefinition RoleDefinition
 	RoleAssignment RoleAssignmentTarget
 	ResourceGroup  ResourceGroup
@@ -322,34 +327,31 @@ func Plan(provider LiveProvider, bundle *Bundle, options *Options) ([]Change, er
 			return nil, unsupportedKind(options.Provider, "appRegistration")
 		}
 		for _, item := range bundle.Apps {
-			current, err := identity.GetApp(item.Name)
+			current, err := identity.GetApp(item.Tenant, item.Name)
 			if err != nil {
 				return nil, err
 			}
-			switch {
-			case current == nil:
-				changes = append(changes, change("appRegistration", ActionCreate, "appRegistration|"+item.Name, "missing", Target{Kind: TargetApp, App: item}))
-			case !stringsEqual(sortedCopy(current.Owners), sortedCopy(item.Owners)) || current.ServicePrincipal != item.ServicePrincipal:
-				c := change("appRegistration", ActionUpdate, "appRegistration|"+item.Name, "owners or service principal differ", Target{Kind: TargetApp, App: item})
-				c.Diffs = setDiffs("owners", current.Owners, item.Owners)
-				if current.ServicePrincipal != item.ServicePrincipal {
-					c.Diffs = append(c.Diffs, FieldDiff{Field: "servicePrincipal", Old: fmt.Sprintf("%t", current.ServicePrincipal), New: fmt.Sprintf("%t", item.ServicePrincipal)})
-				}
-				changes = append(changes, c)
-			}
+			changes = append(changes, planApp(current, item, options)...)
 		}
 		if options.PruneIdentities {
 			desired := map[string]bool{}
+			tenants := []string{""}
 			for _, item := range bundle.Apps {
-				desired[item.Name] = true
+				desired[item.Key()] = true
+				if item.Tenant != "" && !slices.Contains(tenants, item.Tenant) {
+					tenants = append(tenants, item.Tenant)
+				}
 			}
-			names, err := identity.ListAppNames()
-			if err != nil {
-				return nil, err
-			}
-			for _, name := range names {
-				if !desired[name] {
-					changes = append(changes, change("appRegistration", ActionDelete, "appRegistration|"+name, "absent from specs", Target{Kind: TargetApp, App: AppRegistration{Name: name}}))
+			for _, tenant := range tenants {
+				names, err := identity.ListAppNames(tenant)
+				if err != nil {
+					return nil, err
+				}
+				for _, name := range names {
+					live := AppRegistration{Name: name, Tenant: tenant}
+					if !desired[live.Key()] {
+						changes = append(changes, change("appRegistration", ActionDelete, live.Key(), "absent from specs", Target{Kind: TargetApp, App: live}))
+					}
 				}
 			}
 		}
@@ -788,10 +790,28 @@ func applyChange(provider LiveProvider, c *Change, options *Options) error {
 		case c.Target.Kind == TargetGroup:
 			return identity.PutGroup(c.Target.Group)
 		case c.Action == ActionDelete:
-			return identity.DeleteApp(c.Target.App.Name)
+			return identity.DeleteApp(c.Target.App.Tenant, c.Target.App.Name)
 		default:
 			return identity.PutApp(c.Target.App)
 		}
+	case TargetAppSecret:
+		identity, ok := provider.(IdentityProvider)
+		if !ok {
+			return lacks("identity")
+		}
+		if c.Action != ActionDelete {
+			value, err := identity.AddAppSecret(c.Target.App, c.Target.Secret)
+			if err != nil {
+				return err
+			}
+			c.Summary = "value " + value + " (shown once)"
+		}
+		for _, keyID := range c.Target.Stale {
+			if err := identity.RemoveAppSecret(c.Target.App, keyID); err != nil {
+				return err
+			}
+		}
+		return nil
 	case TargetRoleDefinition, TargetRoleAssignment:
 		roles, ok := provider.(RoleProvider)
 		if !ok {
@@ -1345,4 +1365,126 @@ func healthCheckDiffs(current, desired HealthCheck) []FieldDiff {
 		diffs = append(diffs, FieldDiff{Field: "alarm", Old: "missing", New: "present"})
 	}
 	return append(diffs, setDiffs("email", current.Emails, desired.Emails)...)
+}
+
+// now is the clock secret expiry is judged against; tests replace it.
+var now = time.Now
+
+// planApp plans one app registration against its live state: a create
+// when it is missing, one update when any managed field differs, and one
+// change per secret that is missing, stale, or (under identity pruning)
+// unwanted. An unset sign-in field or secrets list is never compared.
+func planApp(current *AppRegistration, item AppRegistration, options *Options) []Change {
+	var changes []Change
+	key := item.Key()
+	if current == nil {
+		changes = append(changes, change("appRegistration", ActionCreate, key, "missing", Target{Kind: TargetApp, App: item}))
+		for _, secret := range item.Secrets {
+			changes = append(changes, change("appRegistration", ActionCreate, secretKey(key, secret.Name), "missing", Target{Kind: TargetAppSecret, App: item, Secret: secret}))
+		}
+		return changes
+	}
+	var diffs []FieldDiff
+	diffs = append(diffs, setDiffs("owners", current.Owners, item.Owners)...)
+	if current.ServicePrincipal != item.ServicePrincipal {
+		diffs = append(diffs, FieldDiff{Field: "servicePrincipal", Old: fmt.Sprintf("%t", current.ServicePrincipal), New: fmt.Sprintf("%t", item.ServicePrincipal)})
+	}
+	summary := "owners or service principal differ"
+	signIn := 0
+	if item.SignInAudience != "" && item.SignInAudience != current.SignInAudience {
+		diffs = append(diffs, FieldDiff{Field: "signInAudience", Old: current.SignInAudience, New: item.SignInAudience})
+		signIn++
+	}
+	if item.RedirectURIs != nil && !stringsEqual(sortedCopy(current.RedirectURIs), sortedCopy(item.RedirectURIs)) {
+		diffs = append(diffs, setDiffs("redirectUris", current.RedirectURIs, item.RedirectURIs)...)
+		signIn++
+	}
+	if item.IDTokenIssuance != nil && (current.IDTokenIssuance == nil || *current.IDTokenIssuance != *item.IDTokenIssuance) {
+		old := "false"
+		if current.IDTokenIssuance != nil {
+			old = fmt.Sprintf("%t", *current.IDTokenIssuance)
+		}
+		diffs = append(diffs, FieldDiff{Field: "idTokenIssuance", Old: old, New: fmt.Sprintf("%t", *item.IDTokenIssuance)})
+		signIn++
+	}
+	if signIn > 0 {
+		summary = "sign-in settings differ"
+	}
+	if len(diffs) > 0 {
+		c := change("appRegistration", ActionUpdate, key, summary, Target{Kind: TargetApp, App: item})
+		c.Diffs = diffs
+		changes = append(changes, c)
+	}
+	if item.Secrets == nil {
+		return changes
+	}
+	wanted := map[string]bool{}
+	for _, secret := range item.Secrets {
+		wanted[secret.Name] = true
+		var live []Secret
+		for _, l := range current.Secrets {
+			if l.Name == secret.Name {
+				live = append(live, l)
+			}
+		}
+		if len(live) == 0 {
+			changes = append(changes, change("appRegistration", ActionCreate, secretKey(key, secret.Name), "missing", Target{Kind: TargetAppSecret, App: item, Secret: secret}))
+			continue
+		}
+		reason := staleReason(live, secret)
+		if reason == "" {
+			continue
+		}
+		var stale []string
+		for _, l := range live {
+			stale = append(stale, l.KeyID)
+		}
+		c := change("appRegistration", ActionUpdate, secretKey(key, secret.Name), "rotate: "+reason, Target{Kind: TargetAppSecret, App: item, Secret: secret, Stale: stale})
+		c.Diffs = secretDiffs(live, secret)
+		changes = append(changes, c)
+	}
+	if options.PruneIdentities {
+		for _, l := range current.Secrets {
+			if !wanted[l.Name] {
+				changes = append(changes, change("appRegistration", ActionDelete, secretKey(key, l.Name), "absent from specs", Target{Kind: TargetAppSecret, App: item, Secret: l, Stale: []string{l.KeyID}}))
+			}
+		}
+	}
+	return changes
+}
+
+// secretKey names one secret change under its registration's key.
+func secretKey(appKey, secret string) string {
+	return appKey + " secret " + secret
+}
+
+// staleReason says why a named secret's live credentials must be rotated:
+// every one has expired, or one was issued before the spec's issuedAfter.
+// The newest credential speaks for the name, so an older leftover never
+// forces a rotation on its own.
+func staleReason(live []Secret, secret Secret) string {
+	newest := live[0]
+	for _, l := range live[1:] {
+		if l.Expires.After(newest.Expires) {
+			newest = l
+		}
+	}
+	switch {
+	case !newest.Expires.IsZero() && !newest.Expires.After(now()):
+		return "expired"
+	case !secret.IssuedAfter.IsZero() && newest.Issued.Before(secret.IssuedAfter):
+		return "issued before " + secret.IssuedAfter.UTC().Format(time.RFC3339)
+	}
+	return ""
+}
+
+// secretDiffs renders the live credential dates behind a rotation; the
+// value itself is never known to plan.
+func secretDiffs(live []Secret, secret Secret) []FieldDiff {
+	var diffs []FieldDiff
+	for _, l := range live {
+		diffs = append(diffs, FieldDiff{Field: "issued", Old: l.Issued.UTC().Format(time.RFC3339), New: "now"})
+		diffs = append(diffs, FieldDiff{Field: "expires", Old: l.Expires.UTC().Format(time.RFC3339), New: fmt.Sprintf("%d days from now", secret.ValidForDays)})
+	}
+	return diffs
 }

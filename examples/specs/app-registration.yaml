@@ -1,5 +1,18 @@
 # Owners remain empty so this example contains no tenant identity data.
+# The sign-in fields declare a web OIDC client. apply prints a new
+# credential's value once and never stores it. Set issuedAfter to rotate
+# one that may have leaked. A tenant field places the registration in
+# another directory than the signed-in one.
 kind: appRegistration
 name: example-attune-application
 owners: []
 servicePrincipal: true
+signInAudience: AzureADMyOrg
+redirectUris:
+  - https://example.com/auth/callback
+  - https://staging.example.com/auth/callback
+idTokenIssuance: true
+secrets:
+  - name: example-host
+    validForDays: 365
+    issuedAfter: 2026-01-01

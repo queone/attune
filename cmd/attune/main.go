@@ -20,7 +20,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.11.2"
+	programVersion = "1.12.0"
 )
 
 var validKinds = []string{
@@ -237,7 +237,7 @@ func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle
 		}
 		fmt.Fprint(a.stderr, groundingLine(name, part.Len(), settings.ContentVersion))
 		if settings.Diagnostic {
-			fmt.Fprintf(a.stderr, "attune: diagnostic %s store=%s\n", provider.Describe(), storePath)
+			fmt.Fprintf(a.stderr, "attune: diagnostic %s%s store=%s\n", provider.Describe(), tenantsSuffix(account.Tenant, part.Tenants()), storePath)
 		}
 		options := &Options{
 			Provider:            name,
@@ -401,6 +401,15 @@ func renderAppliedLine(c Change) string {
 // applied successfully.
 func renderApplyTrailer(applied int) string {
 	return "\n" + color.Grn5(fmt.Sprintf("%d change(s) made.", applied)) + "\n"
+}
+
+// tenantsSuffix renders the ` tenants=<home>,<other>` diagnostic suffix
+// when any spec names a tenant other than the signed-in one.
+func tenantsSuffix(home string, others []string) string {
+	if len(others) == 0 {
+		return ""
+	}
+	return " tenants=" + strings.Join(append([]string{home}, others...), ",")
 }
 
 // contentSuffix renders the optional ` content=<value>` output suffix for a

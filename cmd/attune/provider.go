@@ -24,10 +24,12 @@ type IdentityProvider interface {
 	ListGroupNames() ([]string, error)
 	PutGroup(group SecurityGroup) error
 	DeleteGroup(name string) error
-	GetApp(name string) (*AppRegistration, error)
-	ListAppNames() ([]string, error)
+	GetApp(tenant, name string) (*AppRegistration, error)
+	ListAppNames(tenant string) ([]string, error)
 	PutApp(app AppRegistration) error
-	DeleteApp(name string) error
+	DeleteApp(tenant, name string) error
+	AddAppSecret(app AppRegistration, secret Secret) (string, error)
+	RemoveAppSecret(app AppRegistration, keyID string) error
 }
 
 // RoleProvider is the capability a provider offers for roleDefinition and

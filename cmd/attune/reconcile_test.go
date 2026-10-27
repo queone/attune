@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeProvider is a hand-rolled Provider double for Plan/Apply tests,
@@ -21,6 +22,8 @@ type fakeProvider struct {
 	groupNames      []string
 	apps            []AppRegistration
 	appNames        []string
+	secretsAdded    []string
+	secretsRemoved  []string
 	roleDefinitions []RoleDefinition
 	resourceGroups  []ResourceGroup
 }
@@ -72,14 +75,22 @@ func (p *fakeProvider) ListDNS(zone string) ([]DnsRecord, error) {
 	p.listed = append(p.listed, zone)
 	return p.dns, nil
 }
-func (p *fakeProvider) PutDNS(DnsRecord) error            { return nil }
-func (p *fakeProvider) DeleteDNS(DnsRecord) error         { return nil }
-func (p *fakeProvider) ListGroupNames() ([]string, error) { return p.groupNames, nil }
-func (p *fakeProvider) PutGroup(SecurityGroup) error      { return nil }
-func (p *fakeProvider) DeleteGroup(string) error          { return nil }
-func (p *fakeProvider) ListAppNames() ([]string, error)   { return p.appNames, nil }
-func (p *fakeProvider) PutApp(AppRegistration) error      { return nil }
-func (p *fakeProvider) DeleteApp(string) error            { return nil }
+func (p *fakeProvider) PutDNS(DnsRecord) error                { return nil }
+func (p *fakeProvider) DeleteDNS(DnsRecord) error             { return nil }
+func (p *fakeProvider) ListGroupNames() ([]string, error)     { return p.groupNames, nil }
+func (p *fakeProvider) PutGroup(SecurityGroup) error          { return nil }
+func (p *fakeProvider) DeleteGroup(string) error              { return nil }
+func (p *fakeProvider) ListAppNames(string) ([]string, error) { return p.appNames, nil }
+func (p *fakeProvider) PutApp(AppRegistration) error          { return nil }
+func (p *fakeProvider) DeleteApp(string, string) error        { return nil }
+func (p *fakeProvider) AddAppSecret(app AppRegistration, secret Secret) (string, error) {
+	p.secretsAdded = append(p.secretsAdded, app.Key()+" "+secret.Name)
+	return "synthetic-secret-value", nil
+}
+func (p *fakeProvider) RemoveAppSecret(_ AppRegistration, keyID string) error {
+	p.secretsRemoved = append(p.secretsRemoved, keyID)
+	return nil
+}
 func (p *fakeProvider) ListRoleDefinitions(string) ([]RoleDefinition, error) {
 	return p.roleDefinitions, nil
 }
@@ -106,9 +117,9 @@ func (p *fakeProvider) GetGroup(name string) (*SecurityGroup, error) {
 	return nil, nil
 }
 
-func (p *fakeProvider) GetApp(name string) (*AppRegistration, error) {
+func (p *fakeProvider) GetApp(tenant, name string) (*AppRegistration, error) {
 	for _, a := range p.apps {
-		if a.Name == name {
+		if a.Name == name && a.Tenant == tenant {
 			found := a
 			return &found, nil
 		}
@@ -561,5 +572,163 @@ func TestMonitoringKindsNeedTheirCapability(t *testing.T) {
 		if err == nil || err.Error() != `provider "dnsonly" does not support kind "`+kind+`"` {
 			t.Errorf("%s: %v", kind, err)
 		}
+	}
+}
+
+// TestAppRegistrationSignInFieldsPlanOnlyWhenSet — AT2: a differing
+// managed field plans one update with named diffs, redirect URIs compare
+// as a set, and an unset field never plans against live values.
+//
+//go:fix inline
+func TestAppRegistrationSignInFieldsPlanOnlyWhenSet(t *testing.T) {
+	live := AppRegistration{Name: "site", SignInAudience: "AzureADMultipleOrgs", RedirectURIs: []string{"https://b/", "https://a/"}, IDTokenIssuance: new(true), Secrets: []Secret{{Name: "old", KeyID: "k1"}}}
+	provider := &fakeProvider{apps: []AppRegistration{live}}
+
+	bare := &Bundle{Apps: []AppRegistration{{Name: "site"}}}
+	changes, err := Plan(provider, bare, &Options{PruneIdentities: true})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("unset fields planned %+v", changes)
+	}
+
+	same := &Bundle{Apps: []AppRegistration{{Name: "site", SignInAudience: "AzureADMultipleOrgs", RedirectURIs: []string{"https://a/", "https://b/"}, IDTokenIssuance: new(true)}}}
+	if changes, _ = Plan(provider, same, &Options{}); len(changes) != 0 {
+		t.Errorf("matching fields planned %+v", changes)
+	}
+
+	differ := &Bundle{Apps: []AppRegistration{{Name: "site", SignInAudience: "AzureADMyOrg", RedirectURIs: []string{"https://a/"}, IDTokenIssuance: new(false)}}}
+	changes, _ = Plan(provider, differ, &Options{})
+	if len(changes) != 1 || changes[0].Action != ActionUpdate || changes[0].Summary != "sign-in settings differ" {
+		t.Fatalf("changes = %+v", changes)
+	}
+	var fields []string
+	for _, d := range changes[0].Diffs {
+		fields = append(fields, d.Field)
+	}
+	for _, want := range []string{"signInAudience", "redirectUris removed", "idTokenIssuance"} {
+		if !slices.Contains(fields, want) {
+			t.Errorf("diffs %v lack %s", fields, want)
+		}
+	}
+}
+
+// TestAppRegistrationSecretsPlanCreateRotateAndDelete — AT3: a missing
+// secret plans a create under its own key, an expired or pre-issuedAfter
+// one plans a rotation that removes the old key, an unlisted one deletes
+// only with secrets set and identity pruning on, and no plan line or diff
+// carries a secret value.
+func TestAppRegistrationSecretsPlanCreateRotateAndDelete(t *testing.T) {
+	restore := now
+	now = func() time.Time { return time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC) }
+	defer func() { now = restore }()
+	day := func(d int) time.Time { return time.Date(2026, 10, d, 0, 0, 0, 0, time.UTC) }
+	live := AppRegistration{Name: "site", Secrets: []Secret{
+		{Name: "fresh", KeyID: "k-fresh", Issued: day(20), Expires: day(30)},
+		{Name: "expired", KeyID: "k-expired", Issued: day(1), Expires: day(26)},
+		{Name: "leaked", KeyID: "k-leaked", Issued: day(5), Expires: day(30)},
+		{Name: "extra", KeyID: "k-extra", Issued: day(5), Expires: day(30)},
+	}}
+	provider := &fakeProvider{apps: []AppRegistration{live}}
+	bundle := &Bundle{Apps: []AppRegistration{{Name: "site", Secrets: []Secret{
+		{Name: "fresh", ValidForDays: 730},
+		{Name: "expired", ValidForDays: 730},
+		{Name: "leaked", ValidForDays: 730, IssuedAfter: day(10)},
+		{Name: "new", ValidForDays: 30},
+	}}}}
+
+	changes, err := Plan(provider, bundle, &Options{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	got := map[string]Change{}
+	for _, c := range changes {
+		got[c.Key] = c
+	}
+	if len(changes) != 3 {
+		t.Fatalf("changes = %+v", changes)
+	}
+	if c := got["appRegistration|site secret new"]; c.Action != ActionCreate || c.Kind != "appRegistration" {
+		t.Errorf("new secret: %+v", c)
+	}
+	if c := got["appRegistration|site secret expired"]; c.Action != ActionUpdate || c.Summary != "rotate: expired" || len(c.Target.Stale) != 1 || c.Target.Stale[0] != "k-expired" {
+		t.Errorf("expired secret: %+v", c)
+	}
+	if c := got["appRegistration|site secret leaked"]; c.Action != ActionUpdate || c.Summary != "rotate: issued before 2026-10-10T00:00:00Z" || len(c.Target.Stale) != 1 || c.Target.Stale[0] != "k-leaked" {
+		t.Errorf("leaked secret: %+v", c)
+	}
+
+	changes, _ = Plan(provider, bundle, &Options{PruneIdentities: true})
+	var deleted []string
+	for _, c := range changes {
+		if c.Action == ActionDelete {
+			deleted = append(deleted, c.Key)
+		}
+	}
+	if len(deleted) != 1 || deleted[0] != "appRegistration|site secret extra" {
+		t.Errorf("deleted = %v", deleted)
+	}
+	unmanaged := &Bundle{Apps: []AppRegistration{{Name: "site"}}}
+	if changes, _ = Plan(provider, unmanaged, &Options{PruneIdentities: true}); len(changes) != 0 {
+		t.Errorf("omitted secrets planned %+v", changes)
+	}
+
+	if err := Apply(provider, changes, &Options{}, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	changes, _ = Plan(provider, bundle, &Options{PruneIdentities: true})
+	var reported []Change
+	if err := Apply(provider, changes, &Options{}, func(c Change) { reported = append(reported, c) }); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(provider.secretsAdded) != 3 || len(provider.secretsRemoved) != 3 {
+		t.Errorf("added %v removed %v", provider.secretsAdded, provider.secretsRemoved)
+	}
+	shown := 0
+	for _, c := range reported {
+		if strings.Contains(c.Summary, "synthetic-secret-value") {
+			shown++
+		}
+	}
+	if shown != 3 {
+		t.Errorf("secret value shown on %d applied lines, want 3", shown)
+	}
+	for _, c := range changes {
+		if strings.Contains(c.Summary, "synthetic") {
+			t.Errorf("plan line carries a value: %+v", c)
+		}
+		for _, d := range c.Diffs {
+			if strings.Contains(d.Old+d.New, "synthetic") {
+				t.Errorf("diff carries a value: %+v", d)
+			}
+		}
+	}
+}
+
+// TestAppRegistrationTenantKeysAndPrunesPerTenant — AT5: a spec naming
+// another tenant is looked up and keyed there, and identity pruning lists
+// each named tenant as well as the signed-in one.
+func TestAppRegistrationTenantKeysAndPrunesPerTenant(t *testing.T) {
+	other := "22222222-2222-2222-2222-222222222222"
+	bundle := &Bundle{Apps: []AppRegistration{{Name: "consumer", Tenant: other}, {Name: "home"}}}
+	provider := &fakeProvider{apps: []AppRegistration{{Name: "home"}}, appNames: []string{"home", "consumer", "stale"}}
+	changes, err := Plan(provider, bundle, &Options{PruneIdentities: true})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	var keys []string
+	for _, c := range changes {
+		keys = append(keys, pastTense(c.Action)+" "+c.Key)
+	}
+	want := []string{
+		"created appRegistration|consumer@" + other,
+		"deleted appRegistration|consumer",
+		"deleted appRegistration|stale",
+		"deleted appRegistration|home@" + other,
+		"deleted appRegistration|stale@" + other,
+	}
+	if !slices.Equal(keys, want) {
+		t.Errorf("keys = %v, want %v", keys, want)
 	}
 }

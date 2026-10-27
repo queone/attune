@@ -271,3 +271,83 @@ func TestMonitoringKindsValidateShapes(t *testing.T) {
 		t.Errorf("referenced target: %v", err)
 	}
 }
+
+const signInAppYAML = `kind: appRegistration
+name: example-site
+servicePrincipal: true
+signInAudience: AzureADMyOrg
+redirectUris:
+  - https://example.com/auth/callback
+  - http://localhost:8080/auth/callback
+idTokenIssuance: true
+secrets:
+  - name: host
+    validForDays: 365
+    issuedAfter: 2026-10-01
+`
+
+// TestAppRegistrationSignInFieldsParse — AT1: the sign-in fields, secrets,
+// and tenant parse, an absent field stays unmanaged, and each bad value is
+// refused with a message naming the field.
+func TestAppRegistrationSignInFieldsParse(t *testing.T) {
+	bundle, err := loadSources([]specSource{{name: "app.yaml", content: []byte(signInAppYAML)}}, "azure")
+	if err != nil {
+		t.Fatalf("loadSources: %v", err)
+	}
+	app := bundle.Apps[0]
+	if app.SignInAudience != "AzureADMyOrg" || len(app.RedirectURIs) != 2 || app.IDTokenIssuance == nil || !*app.IDTokenIssuance {
+		t.Errorf("sign-in fields = %+v", app)
+	}
+	if len(app.Secrets) != 1 || app.Secrets[0].Name != "host" || app.Secrets[0].ValidForDays != 365 || app.Secrets[0].IssuedAfter.Format("2006-01-02") != "2026-10-01" {
+		t.Errorf("secrets = %+v", app.Secrets)
+	}
+	if app.Key() != "appRegistration|example-site" {
+		t.Errorf("Key = %q", app.Key())
+	}
+
+	bare, err := loadSources([]specSource{{name: "app.yaml", content: []byte("kind: appRegistration\nname: bare\n")}}, "azure")
+	if err != nil {
+		t.Fatalf("loadSources bare: %v", err)
+	}
+	b := bare.Apps[0]
+	if b.SignInAudience != "" || b.RedirectURIs != nil || b.IDTokenIssuance != nil || b.Secrets != nil || b.Tenant != "" {
+		t.Errorf("bare spec manages a field: %+v", b)
+	}
+	defaults, err := loadSources([]specSource{{name: "app.yaml", content: []byte("kind: appRegistration\nname: d\nsecrets:\n  - name: s\n")}}, "azure")
+	if err != nil {
+		t.Fatalf("loadSources defaults: %v", err)
+	}
+	if got := defaults.Apps[0].Secrets[0].ValidForDays; got != 730 {
+		t.Errorf("validForDays default = %d, want 730", got)
+	}
+
+	tenant := "kind: appRegistration\nname: consumer\ntenant: 11111111-1111-1111-1111-111111111111\n"
+	withTenant, err := loadSources([]specSource{{name: "a.yaml", content: []byte(tenant)}, {name: "b.yaml", content: []byte("kind: appRegistration\nname: consumer\n")}}, "azure")
+	if err != nil {
+		t.Fatalf("same name in two tenants must load: %v", err)
+	}
+	if got := withTenant.Apps[0].Key(); got != "appRegistration|consumer@11111111-1111-1111-1111-111111111111" {
+		t.Errorf("tenant key = %q", got)
+	}
+	if got := withTenant.Tenants(); len(got) != 1 || got[0] != "11111111-1111-1111-1111-111111111111" {
+		t.Errorf("Tenants() = %v", got)
+	}
+	if _, err := loadSources([]specSource{{name: "a.yaml", content: []byte(tenant)}, {name: "b.yaml", content: []byte(tenant)}}, "azure"); err == nil || !strings.Contains(err.Error(), "duplicate resource key") {
+		t.Errorf("same tenant and name twice: got %v", err)
+	}
+
+	bad := map[string]string{
+		"signInAudience must be one of": "kind: appRegistration\nname: x\nsignInAudience: Everyone\n",
+		"redirectUris entry":            "kind: appRegistration\nname: x\nredirectUris:\n  - http://example.com/cb\n",
+		"validForDays must be between":  "kind: appRegistration\nname: x\nsecrets:\n  - name: s\n    validForDays: 731\n",
+		"names \"s\" twice":             "kind: appRegistration\nname: x\nsecrets:\n  - name: s\n  - name: s\n",
+		"issuedAfter must be a date":    "kind: appRegistration\nname: x\nsecrets:\n  - name: s\n    issuedAfter: yesterday\n",
+		"unknown field \"rotate\"":      "kind: appRegistration\nname: x\nsecrets:\n  - name: s\n    rotate: true\n",
+	}
+	for want, content := range bad {
+		_, err := loadSources([]specSource{{name: "bad.yaml", content: []byte(content)}}, "azure")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want error containing %q, got %v", want, err)
+		}
+	}
+}
