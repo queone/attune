@@ -697,28 +697,28 @@ func (p *AzureProvider) appID(app AppRegistration) (string, error) {
 }
 
 // AddAppSecret adds a client secret named secret.Name to app, valid for
-// secret.ValidForDays from now, and returns the value Graph discloses on
-// this one response and never again.
-func (p *AzureProvider) AddAppSecret(app AppRegistration, secret Secret) (string, error) {
+// secret.ValidForDays from now, and returns the new credential's key id and
+// the value Graph discloses on this one response and never again.
+func (p *AzureProvider) AddAppSecret(app AppRegistration, secret Secret) (string, string, error) {
 	defer p.in(app.Tenant)()
 	id, err := p.appID(app)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if id == "" {
-		return "", fmt.Errorf("app registration %q is missing; apply its create first", app.Name)
+		return "", "", fmt.Errorf("app registration %q is missing; apply its create first", app.Name)
 	}
 	expires := now().UTC().AddDate(0, 0, secret.ValidForDays).Format(time.RFC3339)
 	result, err := p.request("POST", fmt.Sprintf("%s/applications/%s/addPassword", graphBase, id),
 		map[string]any{"passwordCredential": map[string]any{"displayName": secret.Name, "endDateTime": expires}})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	value := jsonString(result, "secretText")
 	if value == "" {
-		return "", fmt.Errorf("provider returned no secret value for %q", secret.Name)
+		return "", "", fmt.Errorf("provider returned no secret value for %q", secret.Name)
 	}
-	return value, nil
+	return jsonString(result, "keyId"), value, nil
 }
 
 // RemoveAppSecret removes the client secret with keyID from app.

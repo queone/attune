@@ -25,7 +25,7 @@ Or clone this repository and run `./build.sh`, which tests, builds, and installs
 Then create a store, add the configuration and specs, and validate them offline:
 
 ```text
-attune init -N -t ~/data/etc/attune.store   # create the store and its key, remember the path
+attune init -N -t ~/Sync/attune.store       # create the store and its key, remember the path
 attune add attune.yaml ./attune.yaml        # store the configuration under its name
 attune add ./specs                          # import every spec under a directory
 attune validate                             # validate specs offline

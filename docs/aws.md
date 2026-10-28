@@ -83,6 +83,16 @@ given as a parameter path, such as Canonical's `current` Ubuntu image, is never 
 parameter moves with every release; only a literal AMI id that differs plans a replace. To move a running instance to a
 newer image, replace it as above.
 
+## Parameter Store as a secret target
+
+An Azure `appRegistration` secret can name a Parameter Store parameter as its `deliverTo`, so `apply` writes a new or
+rotated client secret there instead of printing it (see [azure.md](azure.md)). The parameter is a `SecureString` in
+`aws.region`, or the CLI's region when that is unset, encrypted with the account's default key. attune reads only whether
+it exists, through `ssm describe-parameters`, and writes it through `ssm put-parameter` with the value inside the CLI's
+input JSON on standard input, never on a command line. attune never tags, lists, or deletes a parameter. A store whose
+only `aws` use is a delivery target still grounds `aws`, before any provider plans, and prints its grounding line with
+`specs=0`.
+
 ## What attune can prune
 
 Every resource attune creates carries the tag `attune=managed`, IAM roles and instance profiles also live under the path

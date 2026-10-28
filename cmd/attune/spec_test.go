@@ -351,3 +351,45 @@ func TestAppRegistrationSignInFieldsParse(t *testing.T) {
 		}
 	}
 }
+
+// TestSecretDeliverToParsesAndValidates — AT1: deliverTo names a registered
+// provider that accepts deliveries and a valid Parameter Store name, and
+// two secrets may not deliver to the same parameter.
+func TestSecretDeliverToParsesAndValidates(t *testing.T) {
+	spec := func(app, deliverTo string) string {
+		return "kind: appRegistration\nname: " + app + "\nsecrets:\n  - name: host\n    deliverTo:\n" + deliverTo
+	}
+	good := spec("site", "      provider: aws\n      parameter: /app/oidc-client-secret\n")
+	bundle, err := loadSources([]specSource{{name: "app.yaml", content: []byte(good)}}, "azure")
+	if err != nil {
+		t.Fatalf("loadSources: %v", err)
+	}
+	d := bundle.Apps[0].Secrets[0].DeliverTo
+	if d == nil || d.String() != "aws parameter /app/oidc-client-secret" {
+		t.Fatalf("delivery = %+v", d)
+	}
+	if got := bundle.DeliveryProviders(); len(got) != 1 || got[0] != "aws" {
+		t.Errorf("DeliveryProviders() = %v", got)
+	}
+
+	bad := map[string]string{
+		`unknown provider "nope"`:          "      provider: nope\n      parameter: /x\n",
+		"azure does not accept secret":     "      provider: azure\n      parameter: /x\n",
+		"parameter is required":            "      provider: aws\n",
+		"may hold only letters":            "      provider: aws\n      parameter: /bad name\n",
+		"has a path and must start with /": "      provider: aws\n      parameter: app/x\n",
+		"may not start with aws or ssm":    "      provider: aws\n      parameter: /AWS/x\n",
+		`unknown field "region"`:           "      provider: aws\n      parameter: /x\n      region: us-west-2\n",
+	}
+	for want, deliverTo := range bad {
+		_, err := loadSources([]specSource{{name: "bad.yaml", content: []byte(spec("site", deliverTo))}}, "azure")
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "deliverTo") {
+			t.Errorf("want error containing %q, got %v", want, err)
+		}
+	}
+
+	twice := []specSource{{name: "a.yaml", content: []byte(good)}, {name: "b.yaml", content: []byte(spec("other", "      provider: aws\n      parameter: /app/oidc-client-secret\n"))}}
+	if _, err := loadSources(twice, "azure"); err == nil || !strings.Contains(err.Error(), "both deliver to aws parameter /app/oidc-client-secret") {
+		t.Errorf("duplicate delivery: got %v", err)
+	}
+}

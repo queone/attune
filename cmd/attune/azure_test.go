@@ -457,12 +457,12 @@ func TestAppSecretsAddAndRemoveThroughGraph(t *testing.T) {
 		{Status: 204},
 	}}
 	provider := NewAzureProviderWith(syntheticCli{}, transport, "", "")
-	value, err := provider.AddAppSecret(AppRegistration{Name: "site"}, Secret{Name: "host", ValidForDays: 30})
+	keyID, value, err := provider.AddAppSecret(AppRegistration{Name: "site"}, Secret{Name: "host", ValidForDays: 30})
 	if err != nil {
 		t.Fatalf("AddAppSecret: %v", err)
 	}
-	if value != "one-time-value" {
-		t.Errorf("value = %q", value)
+	if keyID != "k2" || value != "one-time-value" {
+		t.Errorf("keyID = %q value = %q", keyID, value)
 	}
 	if requests[1].Method != "POST" || !strings.HasSuffix(requests[1].URL, "/applications/app-object/addPassword") {
 		t.Fatalf("add request = %s %s", requests[1].Method, requests[1].URL)
@@ -491,7 +491,7 @@ func TestAppSecretsAddAndRemoveThroughGraph(t *testing.T) {
 	if err := provider.PutApp(AppRegistration{Name: "fresh"}); err != nil {
 		t.Fatalf("PutApp: %v", err)
 	}
-	if _, err := provider.AddAppSecret(AppRegistration{Name: "fresh"}, Secret{Name: "host", ValidForDays: 30}); err != nil {
+	if _, _, err := provider.AddAppSecret(AppRegistration{Name: "fresh"}, Secret{Name: "host", ValidForDays: 30}); err != nil {
 		t.Fatalf("AddAppSecret after create: %v", err)
 	}
 	last := requests[len(requests)-1]

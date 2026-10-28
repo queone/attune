@@ -47,6 +47,9 @@ secrets:
   - name: host
     validForDays: 365
     issuedAfter: 2026-10-01
+    deliverTo:
+      provider: aws
+      parameter: /app/oidc-client-secret
 tenant: 11111111-1111-1111-1111-111111111111
 ```
 
@@ -64,7 +67,14 @@ tenant: 11111111-1111-1111-1111-111111111111
   live secrets are untouched. `validForDays` applies when a secret is created or rotated and is never a drift source.
 - `apply` prints a new or rotated secret's value once, on its green applied line as `value <secret> (shown once)`. `plan`
   never shows a value, and `-V` shows only the live credential's dates. attune stores nothing; copy the value where the
-  application reads it.
+  application reads it, or name a delivery target so it never reaches the screen.
+- `deliverTo` sends a secret's value straight to another provider instead of the screen. The one target today is an AWS
+  Parameter Store parameter, `deliverTo: {provider: aws, parameter: /app/oidc-client-secret}`, described in
+  [aws.md](aws.md). `apply` adds the credential, writes the value to the parameter, then removes any stale credential,
+  and its applied line reads `value delivered to aws parameter /app/oidc-client-secret`. A parameter that does not exist
+  plans `rotate: aws parameter <name> missing`, since the old value cannot be read back; a parameter that exists is
+  trusted. If the write fails, `apply` removes the credential it just added and stops, so the old credential keeps working.
+  No two secrets may deliver to the same parameter.
 - `tenant` places the registration in another directory than the signed-in one, by tenant id or verified domain, for a
   consumer sign-in tenant such as Entra External ID. The same `name` may then appear once per tenant, and the change key
   becomes `appRegistration|<name>@<tenant>`. attune takes a Graph token for that tenant through the signed-in `az` CLI at

@@ -292,6 +292,9 @@ func loadSources(sources []specSource, defaultProvider string) (*Bundle, error) 
 	if err := checkReferences(bundle); err != nil {
 		return nil, err
 	}
+	if err := checkDeliveries(bundle); err != nil {
+		return nil, err
+	}
 	return bundle, nil
 }
 
@@ -975,7 +978,7 @@ func optionalSecrets(m map[string]any, name string) ([]Secret, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := rejectUnknown(entry, []string{"name", "validForDays", "issuedAfter"}, fmt.Sprintf("%s[%d]", name, i)); err != nil {
+		if err := rejectUnknown(entry, []string{"name", "validForDays", "issuedAfter", "deliverTo"}, fmt.Sprintf("%s[%d]", name, i)); err != nil {
 			return nil, err
 		}
 		secretName, err := requiredString(entry, "name")
@@ -1010,9 +1013,91 @@ func optionalSecrets(m map[string]any, name string) ([]Secret, error) {
 		default:
 			return nil, fmt.Errorf("%s %q issuedAfter must be a date (2006-01-02) or an RFC 3339 time", name, secretName)
 		}
+		if raw, ok := entry["deliverTo"]; ok {
+			delivery, err := parseDelivery(raw)
+			if err != nil {
+				return nil, fmt.Errorf("%s %q deliverTo: %w", name, secretName, err)
+			}
+			secret.DeliverTo = delivery
+		}
 		out = append(out, secret)
 	}
 	return out, nil
+}
+
+// parseDelivery parses a secret's deliverTo mapping: a registered provider
+// that accepts secret deliveries, and its one target field.
+func parseDelivery(raw any) (*Delivery, error) {
+	m, err := mapping(raw, "deliverTo")
+	if err != nil {
+		return nil, err
+	}
+	provider, err := requiredString(m, "provider")
+	if err != nil {
+		return nil, err
+	}
+	spec, err := LookupProvider(provider)
+	if err != nil {
+		return nil, err
+	}
+	if spec.SecretTarget == "" {
+		return nil, fmt.Errorf("provider %s does not accept secret deliveries", provider)
+	}
+	if err := rejectUnknown(m, []string{"provider", spec.SecretTarget}, ""); err != nil {
+		return nil, err
+	}
+	target, err := requiredString(m, spec.SecretTarget)
+	if err != nil {
+		return nil, err
+	}
+	if spec.SecretTarget == "parameter" {
+		if err := checkParameterName(target); err != nil {
+			return nil, err
+		}
+	}
+	return &Delivery{Provider: provider, Field: spec.SecretTarget, Target: target}, nil
+}
+
+// checkParameterName applies Parameter Store's naming rules: 1 to 2048
+// characters of letters, digits, _ . - and /, a leading / on any
+// hierarchical name, and no aws or ssm prefix.
+func checkParameterName(name string) error {
+	if name == "" || len(name) > 2048 {
+		return fmt.Errorf("parameter must be 1 to 2048 characters")
+	}
+	for _, c := range name {
+		if !(c < 128 && (isASCIIAlnum(byte(c)) || strings.ContainsRune("_.-/", c))) {
+			return fmt.Errorf("parameter %q may hold only letters, digits, _, ., -, and /", name)
+		}
+	}
+	if strings.Contains(name, "/") && !strings.HasPrefix(name, "/") {
+		return fmt.Errorf("parameter %q has a path and must start with /", name)
+	}
+	first := strings.ToLower(strings.TrimPrefix(name, "/"))
+	if strings.HasPrefix(first, "aws") || strings.HasPrefix(first, "ssm") {
+		return fmt.Errorf("parameter %q may not start with aws or ssm", name)
+	}
+	return nil
+}
+
+// checkDeliveries refuses two secrets in the store that deliver to the same
+// target.
+func checkDeliveries(bundle *Bundle) error {
+	seen := map[string]string{}
+	for _, app := range bundle.Apps {
+		for _, secret := range app.Secrets {
+			if secret.DeliverTo == nil {
+				continue
+			}
+			key := secret.DeliverTo.String()
+			owner := app.Key() + " secret " + secret.Name
+			if other, ok := seen[key]; ok {
+				return fmt.Errorf("%s and %s both deliver to %s", other, owner, key)
+			}
+			seen[key] = owner
+		}
+	}
+	return nil
 }
 
 // parseTime accepts a date or an RFC 3339 time, both read as UTC.

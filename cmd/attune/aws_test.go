@@ -19,11 +19,17 @@ import (
 type fakeAwsCli struct {
 	recorded map[string][]fakeAwsResult
 	calls    [][]string
+	inputs   [][]byte
 }
 
 type fakeAwsResult struct {
 	out  string
 	exit int
+}
+
+func (f *fakeAwsCli) RunInput(args []string, input []byte) ([]byte, error) {
+	f.inputs = append(f.inputs, input)
+	return f.Run(args)
 }
 
 func (f *fakeAwsCli) Run(args []string) ([]byte, error) {
@@ -1236,5 +1242,55 @@ func TestAwsImageParameterIsResolvedOnlyAtCreate(t *testing.T) {
 	}
 	if slices.Contains(cli.pairs(), "ssm get-parameter") {
 		t.Errorf("plan read the image parameter for a running instance: %v", cli.pairs())
+	}
+}
+
+// TestParameterStoreSinkKeepsValueOffTheCommandLine — AT4: delivery runs
+// put-parameter with the value only in its standard input JSON, presence
+// is read from parameter metadata, and a failed write's error carries no
+// value.
+func TestParameterStoreSinkKeepsValueOffTheCommandLine(t *testing.T) {
+	provider, cli := newAwsFake(map[string][]fakeAwsResult{
+		"ssm put-parameter":       {{out: `{"Version":2,"Tier":"Standard"}`}},
+		"ssm describe-parameters": {{out: `{"Parameters":[{"Name":"/app/host","Type":"SecureString"}]}`}, {out: `{"Parameters":[]}`}},
+	})
+	if err := provider.DeliverSecret("/app/host", []byte("one-time-value")); err != nil {
+		t.Fatalf("DeliverSecret: %v", err)
+	}
+	call := cli.calls[0]
+	if strings.Join(call[:2], " ") != "ssm put-parameter" || cli.argAfter(call, "--cli-input-json") != "file:///dev/stdin" {
+		t.Errorf("call = %v", call)
+	}
+	if strings.Contains(strings.Join(call, " "), "one-time-value") {
+		t.Errorf("value on the command line: %v", call)
+	}
+	var input map[string]any
+	if err := json.Unmarshal(cli.inputs[0], &input); err != nil {
+		t.Fatalf("stdin is not JSON: %v", err)
+	}
+	if input["Name"] != "/app/host" || input["Value"] != "one-time-value" || input["Type"] != "SecureString" || input["Overwrite"] != true {
+		t.Errorf("stdin = %v", input)
+	}
+
+	exists, err := provider.HasSecretTarget("/app/host")
+	if err != nil || !exists {
+		t.Errorf("present parameter: exists=%t err=%v", exists, err)
+	}
+	if got := cli.argAfter(cli.calls[1], "--parameter-filters"); got != "Key=Name,Option=Equals,Values=/app/host" {
+		t.Errorf("filter = %q", got)
+	}
+	if exists, err := provider.HasSecretTarget("/app/host"); err != nil || exists {
+		t.Errorf("absent parameter: exists=%t err=%v", exists, err)
+	}
+	for _, c := range cli.calls[1:] {
+		if slices.Contains(c, "--with-decryption") || c[1] == "get-parameter" {
+			t.Errorf("presence check read a value: %v", c)
+		}
+	}
+
+	failing, _ := newAwsFake(map[string][]fakeAwsResult{})
+	err = failing.DeliverSecret("/app/host", []byte("one-time-value"))
+	if err == nil || strings.Contains(err.Error(), "one-time-value") || !strings.Contains(err.Error(), "ssm put-parameter failed") {
+		t.Errorf("failed write: %v", err)
 	}
 }

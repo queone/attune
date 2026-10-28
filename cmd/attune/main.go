@@ -20,7 +20,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.12.1"
+	programVersion = "1.13.0"
 )
 
 var validKinds = []string{
@@ -213,12 +213,22 @@ type plannedProvider struct {
 // order, so a provider that cannot be reached stops the run before any
 // other provider is changed.
 func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle *Bundle, storePath string) int {
-	var plans []plannedProvider
-	for _, name := range bundle.Providers() {
+	// Providers a secret is delivered to are grounded first, so their
+	// targets can be read during any provider's plan and an unreachable
+	// one stops the run before any plan or change.
+	type groundedProvider struct {
+		provider LiveProvider
+		account  Account
+	}
+	grounded := map[string]groundedProvider{}
+	ground := func(name string) (LiveProvider, Account, bool) {
+		if g, ok := grounded[name]; ok {
+			return g.provider, g.account, true
+		}
 		spec, err := LookupProvider(name)
 		if err != nil {
 			a.errorf("%s", err)
-			return 1
+			return nil, Account{}, false
 		}
 		var block map[string]any
 		if config != nil {
@@ -227,18 +237,41 @@ func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle
 		provider, err := spec.New(settings, block)
 		if err != nil {
 			a.errorf("configure provider %s: %s", name, err)
-			return 1
+			return nil, Account{}, false
 		}
 		part := bundle.ForProvider(name)
 		account, err := provider.Ground()
 		if err != nil {
 			a.errorf("authenticate provider: %s", err)
-			return 1
+			return nil, Account{}, false
 		}
 		fmt.Fprint(a.stderr, groundingLine(name, part.Len(), settings.ContentVersion))
 		if settings.Diagnostic {
 			fmt.Fprintf(a.stderr, "attune: diagnostic %s%s store=%s\n", provider.Describe(), tenantsSuffix(account.Tenant, part.Tenants()), storePath)
 		}
+		grounded[name] = groundedProvider{provider: provider, account: account}
+		return provider, account, true
+	}
+	sinks := map[string]SecretSink{}
+	for _, name := range bundle.DeliveryProviders() {
+		provider, _, ok := ground(name)
+		if !ok {
+			return 1
+		}
+		sink, ok := provider.(SecretSink)
+		if !ok {
+			a.errorf("provider %s cannot receive secret deliveries", name)
+			return 1
+		}
+		sinks[name] = sink
+	}
+	var plans []plannedProvider
+	for _, name := range bundle.Providers() {
+		provider, account, ok := ground(name)
+		if !ok {
+			return 1
+		}
+		part := bundle.ForProvider(name)
 		options := &Options{
 			Provider:            name,
 			Subscription:        account.Subscription,
@@ -249,6 +282,7 @@ func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle
 			PruneResourceGroups: settings.PruneResourceGroups,
 			PruneHosts:          settings.PruneHosts,
 			PruneMonitoring:     settings.PruneMonitoring,
+			Sinks:               sinks,
 		}
 		changes, err := Plan(provider, part, options)
 		if err != nil {

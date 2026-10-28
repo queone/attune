@@ -113,6 +113,17 @@ type Options struct {
 	// Outputs collects live outputs during Plan and applied outputs during
 	// Apply, so a record value can reference another spec. Created when nil.
 	Outputs *Outputs
+	// Sinks holds the grounded providers secrets are delivered to, by name.
+	Sinks map[string]SecretSink
+}
+
+// sink returns the grounded provider a delivery names.
+func (o *Options) sink(d *Delivery) (SecretSink, error) {
+	s, ok := o.Sinks[d.Provider]
+	if !ok {
+		return nil, fmt.Errorf("deliver to %s: provider %s is not grounded for delivery", d, d.Provider)
+	}
+	return s, nil
 }
 
 // outputs returns the run's output set, creating it on first use.
@@ -331,7 +342,11 @@ func Plan(provider LiveProvider, bundle *Bundle, options *Options) ([]Change, er
 			if err != nil {
 				return nil, err
 			}
-			changes = append(changes, planApp(current, item, options)...)
+			appChanges, err := planApp(current, item, options)
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, appChanges...)
 		}
 		if options.PruneIdentities {
 			desired := map[string]bool{}
@@ -800,11 +815,18 @@ func applyChange(provider LiveProvider, c *Change, options *Options) error {
 			return lacks("identity")
 		}
 		if c.Action != ActionDelete {
-			value, err := identity.AddAppSecret(c.Target.App, c.Target.Secret)
+			keyID, value, err := identity.AddAppSecret(c.Target.App, c.Target.Secret)
 			if err != nil {
 				return err
 			}
-			c.Summary = "value " + value + " (shown once)"
+			if delivery := c.Target.Secret.DeliverTo; delivery != nil {
+				if err := deliver(identity, options, c.Target.App, c.Target.Secret, keyID, value); err != nil {
+					return err
+				}
+				c.Summary = "value delivered to " + delivery.String()
+			} else {
+				c.Summary = "value " + value + " (shown once)"
+			}
 		}
 		for _, keyID := range c.Target.Stale {
 			if err := identity.RemoveAppSecret(c.Target.App, keyID); err != nil {
@@ -1378,15 +1400,15 @@ var now = time.Now
 // when it is missing, one update when any managed field differs, and one
 // change per secret that is missing, stale, or (under identity pruning)
 // unwanted. An unset sign-in field or secrets list is never compared.
-func planApp(current *AppRegistration, item AppRegistration, options *Options) []Change {
+func planApp(current *AppRegistration, item AppRegistration, options *Options) ([]Change, error) {
 	var changes []Change
 	key := item.Key()
 	if current == nil {
 		changes = append(changes, change("appRegistration", ActionCreate, key, "missing", Target{Kind: TargetApp, App: item}))
 		for _, secret := range item.Secrets {
-			changes = append(changes, change("appRegistration", ActionCreate, secretKey(key, secret.Name), "missing", Target{Kind: TargetAppSecret, App: item, Secret: secret}))
+			changes = append(changes, change("appRegistration", ActionCreate, secretKey(key, secret.Name), missingSummary(secret), Target{Kind: TargetAppSecret, App: item, Secret: secret}))
 		}
-		return changes
+		return changes, nil
 	}
 	var diffs []FieldDiff
 	diffs = append(diffs, setDiffs("owners", current.Owners, item.Owners)...)
@@ -1420,7 +1442,7 @@ func planApp(current *AppRegistration, item AppRegistration, options *Options) [
 		changes = append(changes, c)
 	}
 	if item.Secrets == nil {
-		return changes
+		return changes, nil
 	}
 	wanted := map[string]bool{}
 	for _, secret := range item.Secrets {
@@ -1432,10 +1454,23 @@ func planApp(current *AppRegistration, item AppRegistration, options *Options) [
 			}
 		}
 		if len(live) == 0 {
-			changes = append(changes, change("appRegistration", ActionCreate, secretKey(key, secret.Name), "missing", Target{Kind: TargetAppSecret, App: item, Secret: secret}))
+			changes = append(changes, change("appRegistration", ActionCreate, secretKey(key, secret.Name), missingSummary(secret), Target{Kind: TargetAppSecret, App: item, Secret: secret}))
 			continue
 		}
 		reason := staleReason(live, secret)
+		if reason == "" && secret.DeliverTo != nil {
+			sink, err := options.sink(secret.DeliverTo)
+			if err != nil {
+				return nil, err
+			}
+			exists, err := sink.HasSecretTarget(secret.DeliverTo.Target)
+			if err != nil {
+				return nil, err
+			}
+			if !exists {
+				reason = secret.DeliverTo.String() + " missing"
+			}
+		}
 		if reason == "" {
 			continue
 		}
@@ -1454,7 +1489,15 @@ func planApp(current *AppRegistration, item AppRegistration, options *Options) [
 			}
 		}
 	}
-	return changes
+	return changes, nil
+}
+
+// missingSummary is the plan summary for a secret that does not exist yet.
+func missingSummary(secret Secret) string {
+	if secret.DeliverTo == nil {
+		return "missing"
+	}
+	return "missing; deliver to " + secret.DeliverTo.String()
 }
 
 // secretKey names one secret change under its registration's key.
@@ -1497,4 +1540,21 @@ func secretDiffs(live []Secret, secret Secret) []FieldDiff {
 // rather than a parameter path resolved at create.
 func isImageID(image string) bool {
 	return strings.HasPrefix(image, "ami-")
+}
+
+// deliver writes a new secret value to its delivery target. When the write
+// fails it removes the credential just added, so no credential is left
+// whose value nobody holds, and the stale credentials stay in place.
+func deliver(identity IdentityProvider, options *Options, app AppRegistration, secret Secret, keyID, value string) error {
+	sink, err := options.sink(secret.DeliverTo)
+	if err == nil {
+		err = sink.DeliverSecret(secret.DeliverTo.Target, []byte(value))
+	}
+	if err == nil {
+		return nil
+	}
+	if removeErr := identity.RemoveAppSecret(app, keyID); removeErr != nil {
+		return fmt.Errorf("deliver secret %s to %s: %w; removing the new credential also failed: %v", secret.Name, secret.DeliverTo, err, removeErr)
+	}
+	return fmt.Errorf("deliver secret %s to %s: %w; the new credential was removed and the old one is unchanged", secret.Name, secret.DeliverTo, err)
 }

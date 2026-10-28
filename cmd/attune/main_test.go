@@ -802,3 +802,78 @@ func TestDiagnosticLineListsOtherTenants(t *testing.T) {
 		t.Errorf("suffix = %q", got)
 	}
 }
+
+// TestDeliveryProviderIsGroundedBeforeAnyPlan — AT5: a provider named only
+// by a delivery target is grounded first with specs=0 and no plan block,
+// is grounded once when it also holds specs, and stops the run before any
+// plan when it cannot be reached.
+func TestDeliveryProviderIsGroundedBeforeAnyPlan(t *testing.T) {
+	restore := color.SetEnabled(false)
+	defer restore()
+	snapshot := snapshotRegistry()
+	t.Cleanup(func() { restoreRegistry(snapshot) })
+	sink := &fakeSink{fakeProvider: fakeProvider{name: "zeta"}}
+	Register(ProviderSpec{Name: "alpha", Kinds: validKinds, New: func(Settings, map[string]any) (LiveProvider, error) {
+		return &fakeProvider{name: "alpha"}, nil
+	}})
+	Register(ProviderSpec{Name: "zeta", Kinds: validKinds, SecretTarget: "parameter", New: func(Settings, map[string]any) (LiveProvider, error) {
+		return sink, nil
+	}})
+	site := AppRegistration{Provider: "alpha", Name: "site", Secrets: []Secret{{Name: "host", ValidForDays: 730, DeliverTo: &Delivery{Provider: "zeta", Field: "parameter", Target: "/app/host"}}}}
+
+	var out, errb strings.Builder
+	a := &app{stdout: &out, stderr: &errb}
+	if code := a.runLive(cmdApply, Settings{}, nil, &Bundle{Apps: []AppRegistration{site}}, "/x/store"); code != 0 {
+		t.Fatalf("runLive exit %d\nstdout: %s\nstderr: %s", code, out.String(), errb.String())
+	}
+	wantErr := "attune: provider=zeta specs=0 authenticated=yes\nattune: provider=alpha specs=1 authenticated=yes\n"
+	if errb.String() != wantErr {
+		t.Errorf("stderr = %q\nwant %q", errb.String(), wantErr)
+	}
+	if strings.Contains(out.String(), "provider=zeta") {
+		t.Errorf("delivery-only provider printed a block:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "value delivered to zeta parameter /app/host") || sink.delivered["/app/host"] != "synthetic-secret-value" {
+		t.Errorf("delivery did not happen:\n%s", out.String())
+	}
+
+	sink.grounds = 0
+	record := DnsRecord{Provider: "zeta", Zone: "example.com", RecordType: "A", Name: "www", TTL: 300, Values: []string{"192.0.2.10"}}
+	out.Reset()
+	errb.Reset()
+	if code := a.runLive(cmdPlan, Settings{}, nil, &Bundle{Apps: []AppRegistration{site}, Dns: []DnsRecord{record}}, "/x/store"); code != 0 {
+		t.Fatalf("runLive with zeta specs exit %d: %s", code, errb.String())
+	}
+	if sink.grounds != 1 || strings.Count(errb.String(), "provider=zeta") != 1 {
+		t.Errorf("zeta grounded %d times, stderr %q", sink.grounds, errb.String())
+	}
+
+	sink.failGround = true
+	out.Reset()
+	errb.Reset()
+	if code := a.runLive(cmdApply, Settings{}, nil, &Bundle{Apps: []AppRegistration{site}}, "/x/store"); code != 1 {
+		t.Errorf("unreachable sink exit %d, want 1", code)
+	}
+	if out.Len() != 0 || strings.Contains(errb.String(), "provider=alpha") {
+		t.Errorf("run continued past an unreachable sink:\nstdout: %s\nstderr: %s", out.String(), errb.String())
+	}
+}
+
+// TestDocsDescribeSecretDelivery — AT6: the azure doc names deliverTo and
+// the delivered line, and the aws doc names the parameter write.
+func TestDocsDescribeSecretDelivery(t *testing.T) {
+	for file, wants := range map[string][]string{
+		"azure.md": {"`deliverTo`", "value delivered to aws parameter"},
+		"aws.md":   {"`ssm put-parameter`", "`SecureString`"},
+	} {
+		doc, err := os.ReadFile(filepath.Join("..", "..", "docs", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(doc), want) {
+				t.Errorf("docs/%s lacks %s", file, want)
+			}
+		}
+	}
+}

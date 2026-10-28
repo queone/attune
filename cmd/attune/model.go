@@ -102,9 +102,38 @@ type Secret struct {
 	Name         string
 	ValidForDays int
 	IssuedAfter  time.Time
+	DeliverTo    *Delivery
 	KeyID        string
 	Issued       time.Time
 	Expires      time.Time
+}
+
+// Delivery names where apply writes a secret's value instead of printing
+// it: a provider, the target field that provider accepts, and the target.
+type Delivery struct {
+	Provider string
+	Field    string
+	Target   string
+}
+
+// String renders a delivery for plan and apply lines, such as
+// "aws parameter /app/secret".
+func (d Delivery) String() string {
+	return d.Provider + " " + d.Field + " " + d.Target
+}
+
+// DeliveryProviders lists, sorted, every provider a secret delivers to.
+func (b *Bundle) DeliveryProviders() []string {
+	var names []string
+	for _, app := range b.Apps {
+		for _, secret := range app.Secrets {
+			if secret.DeliverTo != nil && !slices.Contains(names, secret.DeliverTo.Provider) {
+				names = append(names, secret.DeliverTo.Provider)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // signInAudiences is every value Graph accepts for signInAudience.

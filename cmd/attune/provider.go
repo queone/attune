@@ -28,7 +28,7 @@ type IdentityProvider interface {
 	ListAppNames(tenant string) ([]string, error)
 	PutApp(app AppRegistration) error
 	DeleteApp(tenant, name string) error
-	AddAppSecret(app AppRegistration, secret Secret) (string, error)
+	AddAppSecret(app AppRegistration, secret Secret) (keyID, value string, err error)
 	RemoveAppSecret(app AppRegistration, keyID string) error
 }
 
@@ -132,7 +132,18 @@ type ProviderSpec struct {
 	Name        string
 	Kinds       []string
 	ConfigBlock string
-	New         func(settings Settings, block map[string]any) (LiveProvider, error)
+	// SecretTarget names the deliverTo field this provider accepts, such as
+	// "parameter"; empty means it takes no secret deliveries.
+	SecretTarget string
+	New          func(settings Settings, block map[string]any) (LiveProvider, error)
+}
+
+// SecretSink is the capability a provider offers to receive another
+// provider's secret value, such as an app registration's client secret.
+// HasSecretTarget reads only whether the target exists, never its value.
+type SecretSink interface {
+	HasSecretTarget(target string) (bool, error)
+	DeliverSecret(target string, value []byte) error
 }
 
 var registry = map[string]ProviderSpec{}

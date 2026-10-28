@@ -22,8 +22,10 @@ and `version` needs macOS, because the key lives in the login keychain.
 
 ## Working with it
 
+The examples keep the store in `~/Sync`, standing for any folder your Macs sync, such as one in iCloud Drive.
+
 ```text
-attune init -N -t ~/data/etc/attune-azure.store   # first Mac: create the store and its key, remember the path
+attune init -N -t ~/Sync/attune.store             # first Mac: create the store and its key, remember the path
 attune add attune.yaml ./attune.yaml              # store the configuration under its name
 attune add ./specs                                # import every spec under a directory, named relative to it
 attune add res/dns/new.yaml < new.yaml            # store one new spec from standard input
@@ -33,7 +35,7 @@ attune cat attune.yaml                            # one stored file on stdout
 attune rename dns/old.yaml dns/new.yaml           # change a name, keeping the versions
 attune render                                     # browse a plaintext copy in a private temp directory
 attune st                                         # store, key, entries, last save; drift is plan's job
-attune init -t ~/data/etc/attune-azure.store      # another Mac: unlock with the passphrase, remember the path
+attune init -t ~/Sync/attune.store                # another Mac: unlock with the passphrase, remember the path
 ```
 
 `edit` reopens the editor when the result would not validate; quit without changing anything to abort. Drift against the
@@ -85,10 +87,10 @@ deletes it. `rm` also drops the entry's stored versions; use `edit` when the rec
 
 Done once, from the root of the repository that holds them:
 
-1. `attune init -N -t ~/data/etc/attune-azure.store` and choose a recovery passphrase.
+1. `attune init -N -t ~/Sync/attune.store` and choose a recovery passphrase.
 2. `attune add attune.yaml ./attune.yaml`, then `attune add ./specs`, naming whatever directory held the specs.
 3. `attune validate` prints the same count and `content=` line the repository copy gave, and `attune plan` lists the same
    changes.
-4. On another Mac, `attune init -t ~/data/etc/attune-azure.store` with the passphrase, then `attune validate`.
+4. On another Mac, `attune init -t ~/Sync/attune.store` with the passphrase, then `attune validate`.
 
 Removing the specs from the repository afterwards is a separate step; attune never deletes them.

@@ -54,6 +54,9 @@ Integrated audit adoption is the only command-mediated phase exception. It can a
 - An `appRegistration` may live in another tenant; the Azure provider keeps one Graph token per tenant, taken lazily
   through the `az` CLI. A client secret's value exists only in the one Graph response that creates it: attune prints it
   on the applied line and never stores it, so rotation is declarative, by expiry or by the spec's `issuedAfter`.
+- A provider may receive another provider's secret through the `SecretSink` capability; the registry names the target
+  field each provider accepts. The value moves only in memory and on the receiving CLI's standard input, and a failed
+  delivery removes the credential it was meant to carry.
 - Role-assignment and role-definition IDs are derived deterministically (SHA1-based UUIDv5), to stay stable across repeated `apply` runs and compatible with resources that rkit's attune created.
 - The store is lockbox's sealed SQLite file with its own key under the `attune` Keychain service. Its file starts with the `MACFIT` format tag, which must not change.
 - DNS pruning defaults on. Identity, role, resource-group, host, and monitoring pruning default off.

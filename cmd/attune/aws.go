@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,9 @@ import (
 // non-zero exit is reported as a *CliExit so the provider can redact it.
 type AwsCli interface {
 	Run(args []string) ([]byte, error)
+	// RunInput is Run with input on standard input, for a value that must
+	// never appear on a command line.
+	RunInput(args []string, input []byte) ([]byte, error)
 }
 
 // CliExit is a CLI process that exited non-zero. It carries only the exit
@@ -30,8 +34,18 @@ func (e *CliExit) Error() string { return "exit " + strconv.Itoa(e.Code) }
 type CommandAwsCli struct{}
 
 // Run executes `aws` with args, discarding standard error.
-func (CommandAwsCli) Run(args []string) ([]byte, error) {
-	out, err := exec.Command("aws", args...).Output()
+func (c CommandAwsCli) Run(args []string) ([]byte, error) {
+	return c.RunInput(args, nil)
+}
+
+// RunInput executes `aws` with args and input on standard input,
+// discarding standard error.
+func (CommandAwsCli) RunInput(args []string, input []byte) ([]byte, error) {
+	cmd := exec.Command("aws", args...)
+	if input != nil {
+		cmd.Stdin = bytes.NewReader(input)
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
@@ -149,6 +163,11 @@ func (p *AwsProvider) run(service, operation string, out any, args ...string) er
 // runIn is run with an explicit region, for the services that live in one
 // region regardless of the configured one.
 func (p *AwsProvider) runIn(region, service, operation string, out any, args ...string) error {
+	return p.runWith(region, nil, service, operation, out, args...)
+}
+
+// runWith is runIn with optional standard input.
+func (p *AwsProvider) runWith(region string, input []byte, service, operation string, out any, args ...string) error {
 	pair := service + " " + operation
 	if !awsAllowedCommands[pair] {
 		return fmt.Errorf("refuse to run `aws %s`: not an allowlisted command", pair)
@@ -161,7 +180,13 @@ func (p *AwsProvider) runIn(region, service, operation string, out any, args ...
 	if p.profile != "" {
 		argv = append(argv, "--profile", p.profile)
 	}
-	raw, err := p.cli.Run(argv)
+	var raw []byte
+	var err error
+	if input != nil {
+		raw, err = p.cli.RunInput(argv, input)
+	} else {
+		raw, err = p.cli.Run(argv)
+	}
 	if err != nil {
 		var exit *CliExit
 		if errors.As(err, &exit) {
@@ -421,7 +446,7 @@ func init() {
 		"ec2 modify-instance-metadata-options", "ec2 modify-instance-attribute",
 		"ec2 describe-iam-instance-profile-associations", "ec2 associate-iam-instance-profile", "ec2 replace-iam-instance-profile-association",
 		"ec2 describe-addresses", "ec2 allocate-address", "ec2 associate-address", "ec2 disassociate-address", "ec2 release-address",
-		"ssm get-parameter",
+		"ssm get-parameter", "ssm describe-parameters", "ssm put-parameter",
 		"budgets describe-budgets", "budgets list-tags-for-resource", "budgets describe-notifications-for-budget", "budgets describe-subscribers-for-notification",
 		"budgets create-budget", "budgets update-budget", "budgets create-notification", "budgets delete-notification", "budgets delete-budget",
 		"route53 create-health-check", "route53 change-tags-for-resource", "route53 list-health-checks", "route53 list-tags-for-resources", "route53 update-health-check", "route53 delete-health-check",
@@ -432,10 +457,44 @@ func init() {
 	}
 	spec := registry["aws"]
 	spec.Kinds = []string{"dnsRecordSet", "iamRole", "bucket", "firewall", "instance", "staticAddress", "budget", "healthCheck"}
+	spec.SecretTarget = "parameter"
 	registry["aws"] = spec
 }
 
 var _ MonitoringProvider = (*AwsProvider)(nil)
+
+var _ SecretSink = (*AwsProvider)(nil)
+
+// HasSecretTarget reports whether a Parameter Store parameter exists in
+// the configured region, reading its metadata only, never its value.
+func (p *AwsProvider) HasSecretTarget(name string) (bool, error) {
+	var result struct {
+		Parameters []struct {
+			Name string `json:"Name"`
+		} `json:"Parameters"`
+	}
+	if err := p.run("ssm", "describe-parameters", &result, "--parameter-filters", "Key=Name,Option=Equals,Values="+name); err != nil {
+		return false, err
+	}
+	for _, parameter := range result.Parameters {
+		if parameter.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// DeliverSecret writes value to a Parameter Store SecureString in the
+// configured region with the account's default key, overwriting any
+// earlier value. The value travels only on standard input, inside the
+// CLI's input JSON, never on a command line.
+func (p *AwsProvider) DeliverSecret(name string, value []byte) error {
+	input, err := json.Marshal(map[string]any{"Name": name, "Value": string(value), "Type": "SecureString", "Overwrite": true})
+	if err != nil {
+		return fmt.Errorf("encode parameter input: %w", err)
+	}
+	return p.runWith(p.region, input, "ssm", "put-parameter", nil, "--cli-input-json", "file:///dev/stdin")
+}
 
 var (
 	_ IamRoleProvider = (*AwsProvider)(nil)

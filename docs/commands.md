@@ -52,7 +52,8 @@ host and monitoring kinds.
 A live run groups the specs by provider in name order: it grounds and plans every provider first, printing one grounding line
 and one `attune plan: provider=<name>` block each, and only then applies, one `attune apply: provider=<name>` block each, so
 a provider that cannot be reached stops the run before any other provider is changed. With one provider in the store the
-output is unchanged.
+output is unchanged. A provider that receives a secret through `deliverTo` is grounded before any provider plans, so an
+unreachable delivery target stops the run before any plan.
 
 ## References between specs
 

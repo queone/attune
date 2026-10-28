@@ -83,9 +83,9 @@ func (p *fakeProvider) DeleteGroup(string) error              { return nil }
 func (p *fakeProvider) ListAppNames(string) ([]string, error) { return p.appNames, nil }
 func (p *fakeProvider) PutApp(AppRegistration) error          { return nil }
 func (p *fakeProvider) DeleteApp(string, string) error        { return nil }
-func (p *fakeProvider) AddAppSecret(app AppRegistration, secret Secret) (string, error) {
+func (p *fakeProvider) AddAppSecret(app AppRegistration, secret Secret) (string, string, error) {
 	p.secretsAdded = append(p.secretsAdded, app.Key()+" "+secret.Name)
-	return "synthetic-secret-value", nil
+	return "k-new-" + secret.Name, "synthetic-secret-value", nil
 }
 func (p *fakeProvider) RemoveAppSecret(_ AppRegistration, keyID string) error {
 	p.secretsRemoved = append(p.secretsRemoved, keyID)
@@ -730,5 +730,138 @@ func TestAppRegistrationTenantKeysAndPrunesPerTenant(t *testing.T) {
 	}
 	if !slices.Equal(keys, want) {
 		t.Errorf("keys = %v, want %v", keys, want)
+	}
+}
+
+// fakeSink is a provider that receives secret deliveries, recording each
+// value it is given and counting how often it is grounded.
+type fakeSink struct {
+	fakeProvider
+	grounds    int
+	failGround bool
+	targets    map[string]bool
+	delivered  map[string]string
+	deliverErr error
+}
+
+func (s *fakeSink) Ground() (Account, error) {
+	s.grounds++
+	if s.failGround {
+		return Account{}, errors.New("sink unreachable")
+	}
+	return s.fakeProvider.Ground()
+}
+
+func (s *fakeSink) HasSecretTarget(target string) (bool, error) { return s.targets[target], nil }
+
+func (s *fakeSink) DeliverSecret(target string, value []byte) error {
+	if s.deliverErr != nil {
+		return s.deliverErr
+	}
+	if s.delivered == nil {
+		s.delivered = map[string]string{}
+	}
+	s.delivered[target] = string(value)
+	return nil
+}
+
+func deliveredSecret(name, target string) Secret {
+	return Secret{Name: name, ValidForDays: 730, DeliverTo: &Delivery{Provider: "aws", Field: "parameter", Target: target}}
+}
+
+// TestDeliveredSecretPlansOnTargetPresence — AT2: a missing delivered
+// secret plans a create naming the target, an existing one whose target is
+// missing plans a rotation, one whose target exists plans nothing, and no
+// line or diff carries a value.
+func TestDeliveredSecretPlansOnTargetPresence(t *testing.T) {
+	restore := now
+	now = func() time.Time { return time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC) }
+	defer func() { now = restore }()
+	future := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	live := AppRegistration{Name: "site", Secrets: []Secret{
+		{Name: "present", KeyID: "k-present", Issued: now().AddDate(0, -1, 0), Expires: future},
+		{Name: "absent", KeyID: "k-absent", Issued: now().AddDate(0, -1, 0), Expires: future},
+	}}
+	provider := &fakeProvider{apps: []AppRegistration{live}}
+	sink := &fakeSink{targets: map[string]bool{"/app/present": true}}
+	bundle := &Bundle{Apps: []AppRegistration{{Name: "site", Secrets: []Secret{
+		deliveredSecret("present", "/app/present"),
+		deliveredSecret("absent", "/app/absent"),
+		deliveredSecret("new", "/app/new"),
+	}}}}
+	changes, err := Plan(provider, bundle, &Options{Sinks: map[string]SecretSink{"aws": sink}})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	got := map[string]string{}
+	for _, c := range changes {
+		got[c.Key] = c.Summary
+		for _, d := range c.Diffs {
+			if strings.Contains(d.Old+d.New, "synthetic") {
+				t.Errorf("diff carries a value: %+v", d)
+			}
+		}
+	}
+	want := map[string]string{
+		"appRegistration|site secret absent": "rotate: aws parameter /app/absent missing",
+		"appRegistration|site secret new":    "missing; deliver to aws parameter /app/new",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("changes = %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+
+	expired := AppRegistration{Name: "site", Secrets: []Secret{{Name: "absent", KeyID: "k-absent", Issued: now().AddDate(-1, 0, 0), Expires: now().AddDate(0, 0, -1)}}}
+	changes, _ = Plan(&fakeProvider{apps: []AppRegistration{expired}}, &Bundle{Apps: []AppRegistration{{Name: "site", Secrets: []Secret{deliveredSecret("absent", "/app/absent")}}}}, &Options{Sinks: map[string]SecretSink{"aws": sink}})
+	if len(changes) != 1 || changes[0].Summary != "rotate: expired" {
+		t.Errorf("expired and missing target: %+v", changes)
+	}
+
+	if _, err := Plan(provider, bundle, &Options{}); err == nil || !strings.Contains(err.Error(), "not grounded for delivery") {
+		t.Errorf("no sink: got %v", err)
+	}
+}
+
+// TestDeliveredSecretAppliesAndRollsBack — AT3: apply adds the credential,
+// delivers the exact value, then removes the stale one, and its line names
+// the target without the value; a failed delivery removes only the new
+// credential and returns the rollback error.
+func TestDeliveredSecretAppliesAndRollsBack(t *testing.T) {
+	secret := deliveredSecret("host", "/app/host")
+	rotation := []Change{{Kind: "appRegistration", Action: ActionUpdate, Key: "appRegistration|site secret host", Summary: "rotate: expired",
+		Target: Target{Kind: TargetAppSecret, App: AppRegistration{Name: "site"}, Secret: secret, Stale: []string{"k-old"}}}}
+
+	provider := &fakeProvider{}
+	sink := &fakeSink{}
+	var reported []Change
+	if err := Apply(provider, rotation, &Options{Sinks: map[string]SecretSink{"aws": sink}}, func(c Change) { reported = append(reported, c) }); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if sink.delivered["/app/host"] != "synthetic-secret-value" {
+		t.Errorf("delivered = %v", sink.delivered)
+	}
+	if !slices.Equal(provider.secretsRemoved, []string{"k-old"}) {
+		t.Errorf("removed = %v", provider.secretsRemoved)
+	}
+	if len(reported) != 1 || reported[0].Summary != "value delivered to aws parameter /app/host" {
+		t.Errorf("reported = %+v", reported)
+	}
+
+	provider = &fakeProvider{}
+	failing := &fakeSink{deliverErr: errors.New("aws ssm put-parameter failed with exit 255")}
+	err := Apply(provider, rotation, &Options{Sinks: map[string]SecretSink{"aws": failing}}, nil)
+	want := "deliver secret host to aws parameter /app/host: aws ssm put-parameter failed with exit 255; the new credential was removed and the old one is unchanged"
+	if err == nil || err.Error() != want {
+		t.Errorf("Apply = %v, want %q", err, want)
+	}
+	if !slices.Equal(provider.secretsRemoved, []string{"k-new-host"}) {
+		t.Errorf("rollback removed %v, want only the new credential", provider.secretsRemoved)
+	}
+	if err != nil && strings.Contains(err.Error(), "synthetic") {
+		t.Errorf("error carries the value: %v", err)
 	}
 }
