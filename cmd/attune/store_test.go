@@ -764,6 +764,40 @@ func TestOlderAttuneWarnsOnOpen(t *testing.T) {
 	}
 }
 
+// TestHelpShowsNoticeOnlyWhenNewer: bare attune and -h print the help
+// unchanged on stdout and, when a newer release exists and stderr is a
+// terminal, one notice on stderr; otherwise nothing and no check.
+func TestHelpShowsNoticeOnlyWhenNewer(t *testing.T) {
+	restore := color.SetEnabled(false)
+	defer restore()
+	h := newHarness(t)
+	help := usage()
+	h.app.stderrTerminal = func() bool { return true }
+	h.update = update.Result{Current: thisVersion, Latest: "v99.0.0", Available: true}
+	want := "attune: v99.0.0 available; run go install github.com/queone/attune/cmd/attune@v99.0.0\n"
+	for _, args := range [][]string{{}, {"-h"}, {"help"}} {
+		code, out, errs := h.runRaw(args...)
+		if code != 0 || out != help || errs != want {
+			t.Errorf("attune %v: exit %d, help unchanged %t, stderr %q", args, code, out == help, errs)
+		}
+	}
+	for _, r := range []update.Result{{Current: thisVersion, Latest: thisVersion}, {Current: thisVersion, Skipped: "NO_UPDATE_CHECK is set"}} {
+		h.update = r
+		if _, out, errs := h.runRaw(); out != help || errs != "" {
+			t.Errorf("no newer release: stderr %q", errs)
+		}
+	}
+	h.update, h.updateErr = update.Result{}, errors.New("proxy timed out")
+	if _, _, errs := h.runRaw(); errs != "" {
+		t.Errorf("failed check printed %q", errs)
+	}
+	h.app.stderrTerminal = func() bool { return false }
+	h.updateChecks = 0
+	if _, _, errs := h.runRaw(); errs != "" || h.updateChecks != 0 {
+		t.Errorf("stderr not a terminal: stderr %q, %d checks", errs, h.updateChecks)
+	}
+}
+
 // TestOnlyStChecksForUpdates — AT4 and AT5: no command but st calls the
 // version check, and st ends by pointing at plan for every provider.
 func TestOnlyStChecksForUpdates(t *testing.T) {

@@ -65,7 +65,10 @@ record nor read the version, so a Mac still on one is upgraded by hand once.
 in yellow, `none (vX.Y.Z is the latest, checked TIME)`, `skipped (REASON)`, or `unknown (ERROR)`. `st` asks the Go module
 proxy, the first `GOPROXY` entry, at most once a day, with a two-second timeout and an hour's wait after a failure, and
 keeps the answer in `~/Library/Caches/attune/update-check`. Set `NO_UPDATE_CHECK` to any value to skip it; a development
-build and a `GOPROXY` of `off` or `direct` skip it too. No other command checks, and attune never installs anything.
+build and a `GOPROXY` of `off` or `direct` skip it too. Bare `attune` and `attune -h` share the same daily check and,
+when a newer release exists and stderr is a terminal, print one line after the help:
+`attune: vX.Y.Z available; run go install github.com/queone/attune/cmd/attune@vX.Y.Z`. They print nothing extra otherwise.
+No other command checks, so scripts make no such request, and attune never installs anything.
 
 ## Adding and removing a record
 

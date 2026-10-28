@@ -3,6 +3,7 @@
 | Version | Summary |
 |---------|---------|
 | Unreleased | |
+| 1.15.1 | attune v1.15.1 shows a newer-release notice after its help screen |
 | 1.15.0 | AC14: attune v1.15.0 shows newer releases in st, records the store's writer |
 | 1.14.0 | AC13: attune v1.14.0 lets a record reference a resource on another provider |
 | 1.13.1 | attune v1.13.1 sends a delivered secret on stdin via --value, names CLI exits |

@@ -93,5 +93,5 @@ deliberately omits.
 Apart from its store, the remembered store path, this Mac's last-save record in `$XDG_STATE_HOME/attune/`, `st`'s
 update-check cache in `~/Library/Caches/attune/`, `render` output, and the private temporary file `edit` opens, attune writes
 no local state, cache, telemetry, copied specs, or diagnostic artifacts. Serviced-repository data is sent only to the
-configured provider endpoints during an operator-requested live command. The one other request is `st`'s daily version
-check to the Go module proxy, which carries attune's module path and nothing else; see [store.md](store.md).
+configured provider endpoints during an operator-requested live command. The one other request is the daily version
+check that `st` and the help screen share, to the Go module proxy, which carries attune's module path and nothing else; see [store.md](store.md).

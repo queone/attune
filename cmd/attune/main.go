@@ -22,7 +22,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.15.0"
+	programVersion = "1.15.1"
 	modulePath     = "github.com/queone/attune"
 	installPath    = modulePath + "/cmd/attune"
 )
@@ -70,8 +70,12 @@ type app struct {
 	readLine   func(prompt string) (string, error)
 	editor     func(path string) error
 	now        func() time.Time
-	// checkUpdate asks whether a newer attune exists; only st calls it.
+	// checkUpdate asks whether a newer attune exists; only st and the help
+	// screen call it.
 	checkUpdate func() (update.Result, error)
+	// stderrTerminal reports whether stderr is a terminal, so the help
+	// screen's notice never reaches a pipe or a log.
+	stderrTerminal func() bool
 }
 
 func newApp() *app {
@@ -92,7 +96,20 @@ func newApp() *app {
 	}
 	a.readLine = a.terminalLine
 	a.checkUpdate = checkUpdate
+	a.stderrTerminal = func() bool { return term.IsTerminal(int(os.Stderr.Fd())) }
 	return a
+}
+
+// helpNotice prints one stderr line after the help screen when a newer
+// attune exists and stderr is a terminal. It prints nothing for an error, a
+// skip, or no update, and never changes the help text or the exit code.
+func (a *app) helpNotice() {
+	if a.stderrTerminal == nil || !a.stderrTerminal() {
+		return
+	}
+	if r, err := a.checkUpdate(); err == nil && r.Available {
+		a.errorf("%s available; run go install %s@%s", r.Latest, installPath, r.Latest)
+	}
 }
 
 // thisVersion is the running attune's release version, as tags name it.
@@ -142,6 +159,7 @@ func (a *app) run(args []string) int {
 	}
 	if len(args) == 0 || (len(args) == 1 && isHelpArg(args[0])) {
 		fmt.Fprint(a.stdout, usage())
+		a.helpNotice()
 		return 0
 	}
 	if a.goos != "darwin" {
