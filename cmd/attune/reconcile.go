@@ -1084,8 +1084,8 @@ func planHost(provider LiveProvider, bundle *Bundle, options *Options, changes *
 		collect(kindDeletes)
 	}
 
-	for i := len(deletes) - 1; i >= 0; i-- {
-		*changes = append(*changes, deletes[i]...)
+	for _, delete := range slices.Backward(deletes) {
+		*changes = append(*changes, delete...)
 	}
 	return nil
 }

@@ -64,8 +64,7 @@ func (CommandAwsCli) RunInput(args []string, input []byte) ([]byte, error) {
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
+		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
 			return nil, &CliExit{Code: exit.ExitCode()}
 		}
 		return nil, fmt.Errorf("run the aws CLI: %w; install it and sign it in with `aws login` or `aws configure`", err)
@@ -205,8 +204,7 @@ func (p *AwsProvider) runWith(region string, input []byte, service, operation st
 		raw, err = p.cli.Run(argv)
 	}
 	if err != nil {
-		var exit *CliExit
-		if errors.As(err, &exit) {
+		if exit, ok := errors.AsType[*CliExit](err); ok {
 			return fmt.Errorf("aws %s failed with exit %d%s", pair, exit.Code, exitMeaning(exit.Code))
 		}
 		return err

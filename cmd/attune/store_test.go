@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/queone/gkit/color"
 	"github.com/queone/gkit/lockbox"
+	"github.com/queone/gkit/update"
 )
 
 // testKDF keeps passphrase derivation fast in tests.
@@ -38,6 +40,11 @@ type harness struct {
 	cfg   string
 	store string
 	keys  *lockbox.MemoryKeyStore
+	// update is what the injected version check returns; updateChecks
+	// counts its calls, so a test can prove only st reaches it.
+	update       update.Result
+	updateErr    error
+	updateChecks int
 }
 
 func testEnv(home string) lockbox.Env {
@@ -105,6 +112,11 @@ func newHarness(t *testing.T) *harness {
 		editor:     func(string) error { return nil },
 		now:        func() time.Time { return testNow },
 	}
+	h.app.checkUpdate = func() (update.Result, error) {
+		h.updateChecks++
+		return h.update, h.updateErr
+	}
+	h.update = update.Result{Current: thisVersion, Skipped: "test harness"}
 	return h
 }
 
@@ -298,7 +310,7 @@ func TestStShowsStoreState(t *testing.T) {
 	}
 	h.initAndAdd()
 	out := h.mustRun("st")
-	for _, want := range []string{"store: " + h.store + " (flag)", "remembered: " + h.app.pointerFile() + " -> " + h.store, "login keychain: present", "store opens: yes", "entries: 7", "conflict copies: none", "last save here: in store (generation 3, 2026-09-23 17:55:02)", "drift: run attune plan to compare with Azure"} {
+	for _, want := range []string{"store: " + h.store + " (flag)", "remembered: " + h.app.pointerFile() + " -> " + h.store, "login keychain: present", "store opens: yes", "entries: 7", "conflict copies: none", "last save here: in store (generation 3, 2026-09-23 17:55:02)", "written by: " + thisVersion, "update: skipped (test harness)", "drift: run attune plan to compare with the providers"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("st lacks %q:\n%s", want, out)
 		}
@@ -601,5 +613,175 @@ func TestAddRejectsAnUnknownProviderAtSaveTime(t *testing.T) {
 	h.mustRun("add", "zones/good.yaml", good)
 	if out := h.mustRun("validate"); !strings.HasPrefix(out, "attune validate: OK (7 specs)") {
 		t.Fatalf("validate after add: %q", out)
+	}
+}
+
+// stLine returns the value st printed for label, or fails.
+func stLine(t *testing.T, out, label string) string {
+	t.Helper()
+	for line := range strings.SplitSeq(out, "\n") {
+		if value, ok := strings.CutPrefix(line, label+": "); ok {
+			return value
+		}
+	}
+	t.Fatalf("st printed no %s line:\n%s", label, out)
+	return ""
+}
+
+// setWriterVersion plays another attune: it records v as the harness
+// store's writer version and saves.
+func (h *harness) setWriterVersion(v string) {
+	h.t.Helper()
+	st, err := lockbox.Load(h.store, h.keys.Keys[h.keyID()])
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetWriterVersion(v); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := st.Save(); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// writerVersion reads the harness store's recorded writer version.
+func (h *harness) writerVersion() string {
+	h.t.Helper()
+	st, err := lockbox.Load(h.store, h.keys.Keys[h.keyID()])
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer st.Close()
+	v, err := st.WriterVersion()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return v
+}
+
+// TestStShowsUpdateStatus — AT1: st prints every update form, the newer
+// release in yellow with the exact install command, without changing its
+// exit code.
+func TestStShowsUpdateStatus(t *testing.T) {
+	restore := color.SetEnabled(false)
+	defer restore()
+	h := newHarness(t)
+	h.initAndAdd()
+	checked := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+	when := checked.Local().Format(time.DateTime)
+	cases := []struct {
+		result update.Result
+		err    error
+		want   string
+	}{
+		{update.Result{Current: thisVersion, Latest: "v99.0.0", Available: true, CheckedAt: checked}, nil,
+			"v99.0.0 available; run go install github.com/queone/attune/cmd/attune@v99.0.0"},
+		{update.Result{Current: thisVersion, Latest: thisVersion, CheckedAt: checked}, nil, "none (" + thisVersion + " is the latest, checked " + when + ")"},
+		{update.Result{Current: thisVersion, CheckedAt: checked}, nil, "none (checked " + when + ")"},
+		{update.Result{Current: thisVersion, Skipped: "NO_UPDATE_CHECK is set"}, nil, "skipped (NO_UPDATE_CHECK is set)"},
+		{update.Result{Current: thisVersion, Skipped: update.SkippedRecentFailure}, nil, "unknown (recent check failed)"},
+		{update.Result{Current: thisVersion}, errors.New("proxy timed out"), "unknown (proxy timed out)"},
+	}
+	for _, c := range cases {
+		h.update, h.updateErr = c.result, c.err
+		out := h.mustRun("st")
+		if got := stLine(t, out, "update"); got != c.want {
+			t.Errorf("update = %q, want %q", got, c.want)
+		}
+	}
+	color.SetEnabled(true)
+	h.update, h.updateErr = cases[0].result, nil
+	out := h.mustRun("st")
+	if got := stLine(t, out, "update"); got != color.Yel5(cases[0].want) {
+		t.Errorf("available line is not yellow: %q", got)
+	}
+}
+
+// TestSaveRecordsWriterVersionWithoutLoweringIt — AT2: init and every save
+// record the running version, a save never lowers a newer recorded one, and
+// st shows the version, none recorded, or the yellow newer form.
+func TestSaveRecordsWriterVersionWithoutLoweringIt(t *testing.T) {
+	restore := color.SetEnabled(false)
+	defer restore()
+	h := newHarness(t)
+	h.initAndAdd()
+	if got := h.writerVersion(); got != thisVersion {
+		t.Errorf("writer version after init and add = %q, want %q", got, thisVersion)
+	}
+	if got := stLine(t, h.mustRun("st"), "written by"); got != thisVersion {
+		t.Errorf("written by = %q", got)
+	}
+	h.setWriterVersion("v99.0.0")
+	h.mustRun("rename", "dns.yaml", "dns-renamed.yaml")
+	if got := h.writerVersion(); got != "v99.0.0" {
+		t.Errorf("an older save lowered the writer version to %q", got)
+	}
+	want := "v99.0.0, newer than this attune (" + thisVersion + "); run go install github.com/queone/attune/cmd/attune@v99.0.0"
+	if got := stLine(t, h.mustRun("st"), "written by"); got != want {
+		t.Errorf("written by = %q, want %q", got, want)
+	}
+
+	legacy := newHarness(t)
+	key, err := lockbox.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := lockbox.NewKeyID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := lockbox.Create(legacy.store, lockbox.Header{KeyID: id}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	if err := legacy.keys.Put(lockbox.KeyIDString(id), key); err != nil {
+		t.Fatal(err)
+	}
+	if got := stLine(t, legacy.mustRun("st"), "written by"); got != "none recorded" {
+		t.Errorf("store from an older attune: written by = %q", got)
+	}
+}
+
+// TestOlderAttuneWarnsOnOpen — AT3: a command other than st that opens a
+// store a newer attune wrote warns on stderr and still succeeds; an equal
+// recorded version prints nothing.
+func TestOlderAttuneWarnsOnOpen(t *testing.T) {
+	h := newHarness(t)
+	h.initAndAdd()
+	if code, _, errs := h.run("ls"); code != 0 || errs != "" {
+		t.Errorf("same version: exit %d, stderr %q", code, errs)
+	}
+	h.setWriterVersion("v99.0.0")
+	code, _, errs := h.run("ls")
+	want := "attune: warning: attune v99.0.0 last wrote this store, newer than this " + thisVersion + "; run go install github.com/queone/attune/cmd/attune@v99.0.0\n"
+	if code != 0 || errs != want {
+		t.Errorf("exit %d, stderr %q, want %q", code, errs, want)
+	}
+}
+
+// TestOnlyStChecksForUpdates — AT4 and AT5: no command but st calls the
+// version check, and st ends by pointing at plan for every provider.
+func TestOnlyStChecksForUpdates(t *testing.T) {
+	restore := color.SetEnabled(false)
+	defer restore()
+	h := newHarness(t)
+	h.initAndAdd()
+	h.mustRun("validate")
+	h.mustRun("ls")
+	h.mustRun("cat", "attune.yaml")
+	if h.updateChecks != 0 {
+		t.Errorf("%d version checks outside st", h.updateChecks)
+	}
+	out := h.mustRun("st")
+	if h.updateChecks != 1 {
+		t.Errorf("st made %d version checks, want 1", h.updateChecks)
+	}
+	if !strings.HasSuffix(out, "drift: run attune plan to compare with the providers\n") {
+		t.Errorf("st does not end with the providers drift line:\n%s", out)
 	}
 }

@@ -42,7 +42,7 @@ attune init -t ~/Sync/attune.store                # another Mac: unlock with the
 provider is what `plan` reports, so `st` never contacts a provider.
 
 `st` starts with the time of the check (`checked`), so pasted output shows when it was taken, and ends with
-`last save here` before the drift note. Every command that saves the store adds a row to a short save log inside it, holding
+`last save here`, `written by`, and `update` before the drift note. Every command that saves the store adds a row to a short save log inside it, holding
 the newest 100 saves. It also records the save in `$XDG_STATE_HOME/attune/last-save-KEYID` on this Mac, with mode 0600 and
 no spec contents. The record names the command and its own arguments, without `-t`. `last save here` is green `in store`
 while the store still holds that save, and red `lost: COMMAND at TIME` when another Mac's copy has replaced it. That happens
@@ -53,6 +53,19 @@ exit 1. Every other command that opens the store, `plan` and `apply` included, p
 until this Mac saves again, so re-running the named command clears it. After an `add NAME` that read standard input, pipe
 the content in again. `key show`, `key restore`, `key rm`, and `key passphrase` maintain the keychain item exactly as
 macfit's do; see macfit's README for the key and passphrase model.
+
+Every save also records the newest attune version that ever wrote the store; an older attune saving it never lowers that
+version. `written by` shows it, in yellow with the exact `go install github.com/queone/attune/cmd/attune@vX.Y.Z` command
+when it is newer than the running attune, which happens when one Mac upgrades before another. Every other command that
+opens such a store prints `warning: attune vX.Y.Z last wrote this store, newer than this vA.B.C; run go install ...` on
+stderr and carries on. A store last saved by attune v1.14.0 or earlier shows `none recorded`, and those releases neither
+record nor read the version, so a Mac still on one is upgraded by hand once.
+
+`update` says whether a newer attune exists: `vX.Y.Z available; run go install github.com/queone/attune/cmd/attune@vX.Y.Z`
+in yellow, `none (vX.Y.Z is the latest, checked TIME)`, `skipped (REASON)`, or `unknown (ERROR)`. `st` asks the Go module
+proxy, the first `GOPROXY` entry, at most once a day, with a two-second timeout and an hour's wait after a failure, and
+keeps the answer in `~/Library/Caches/attune/update-check`. Set `NO_UPDATE_CHECK` to any value to skip it; a development
+build and a `GOPROXY` of `off` or `direct` skip it too. No other command checks, and attune never installs anything.
 
 ## Adding and removing a record
 

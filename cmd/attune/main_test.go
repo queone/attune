@@ -22,6 +22,7 @@ func captureRun(t *testing.T, args []string) (code int, stdout, stderr string) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 	t.Setenv("ATTUNE_STORE", "")
+	t.Setenv("NO_UPDATE_CHECK", "1")
 	origOut, origErr := os.Stdout, os.Stderr
 	ro, wo, err := os.Pipe()
 	if err != nil {
@@ -812,7 +813,7 @@ func TestDeliveryProviderIsGroundedBeforeAnyPlan(t *testing.T) {
 	defer restore()
 	snapshot := snapshotRegistry()
 	t.Cleanup(func() { restoreRegistry(snapshot) })
-	sink := &fakeSink{fakeProvider: fakeProvider{name: "zeta"}}
+	sink := &fakeSink{name: "zeta"}
 	Register(ProviderSpec{Name: "alpha", Kinds: validKinds, New: func(Settings, map[string]any) (LiveProvider, error) {
 		return &fakeProvider{name: "alpha"}, nil
 	}})
@@ -888,7 +889,7 @@ func TestReferencedProviderPlansAndAppliesFirst(t *testing.T) {
 	snapshot := snapshotRegistry()
 	t.Cleanup(func() { restoreRegistry(snapshot) })
 	dns := &fakeProvider{name: "alpha", dns: []DnsRecord{}}
-	host := &fakeHost{fakeProvider: fakeProvider{name: "zeta"}, newIP: "203.0.113.20"}
+	host := &fakeHost{name: "zeta", newIP: "203.0.113.20"}
 	Register(ProviderSpec{Name: "alpha", Kinds: validKinds, New: func(Settings, map[string]any) (LiveProvider, error) { return dns, nil }})
 	Register(ProviderSpec{Name: "zeta", Kinds: validKinds, New: func(Settings, map[string]any) (LiveProvider, error) { return host, nil }})
 	bundle := &Bundle{

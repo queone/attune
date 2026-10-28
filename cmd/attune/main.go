@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -15,12 +16,15 @@ import (
 	"github.com/queone/gkit/color"
 	"github.com/queone/gkit/help"
 	"github.com/queone/gkit/lockbox"
+	"github.com/queone/gkit/update"
 	"golang.org/x/term"
 )
 
 const (
 	programName    = "attune"
-	programVersion = "1.14.0"
+	programVersion = "1.15.0"
+	modulePath     = "github.com/queone/attune"
+	installPath    = modulePath + "/cmd/attune"
 )
 
 var validKinds = []string{
@@ -66,6 +70,8 @@ type app struct {
 	readLine   func(prompt string) (string, error)
 	editor     func(path string) error
 	now        func() time.Time
+	// checkUpdate asks whether a newer attune exists; only st calls it.
+	checkUpdate func() (update.Result, error)
 }
 
 func newApp() *app {
@@ -85,7 +91,21 @@ func newApp() *app {
 		now:        time.Now,
 	}
 	a.readLine = a.terminalLine
+	a.checkUpdate = checkUpdate
 	return a
+}
+
+// thisVersion is the running attune's release version, as tags name it.
+const thisVersion = "v" + programVersion
+
+// checkUpdate asks the Go module proxy, at most once a day, whether a newer
+// attune exists. It never installs anything.
+func checkUpdate() (update.Result, error) {
+	dir, err := update.CacheDir(programName)
+	if err != nil {
+		return update.Result{Current: thisVersion}, err
+	}
+	return update.Check(update.Options{Module: modulePath, Current: thisVersion, CacheFile: filepath.Join(dir, "update-check")})
 }
 
 // terminalSecret prompts on stderr and reads one line with echo off.

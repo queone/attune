@@ -10,7 +10,7 @@ truth; there is no state backend, initialization step, or local state file.
 
 Infrastructure tools keep a state file, and the state file is where drift hides and secrets leak. attune keeps none. It
 reads YAML specs from an encrypted store, compares them with what the provider actually holds, and applies only the reviewed
-difference. Credentials stay with each provider's own CLI, and attune writes nothing else to disk.
+difference. Credentials stay with each provider's own CLI, and attune keeps no state of its own outside the store.
 
 ## Getting Started
 

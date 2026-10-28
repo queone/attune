@@ -16,6 +16,7 @@ import (
 
 	"github.com/queone/gkit/color"
 	"github.com/queone/gkit/lockbox"
+	"github.com/queone/gkit/update"
 )
 
 // configName is the entry name of the configuration file.
@@ -227,6 +228,9 @@ func (a *app) openStore(path string) (*lockbox.Store, error) {
 		a.errorf("warning: this Mac's last save (%s at %s) is missing from the store; another Mac's copy replaced it. Run it again.",
 			rec.Action, rec.At.Local().Format(time.DateTime))
 	}
+	if v, err := st.WriterVersion(); err == nil && update.Newer(v, thisVersion) {
+		a.errorf("warning: attune %s last wrote this store, newer than this %s; run go install %s@%s", v, thisVersion, installPath, v)
+	}
 	return st, nil
 }
 
@@ -243,6 +247,17 @@ func (a *app) lastSaveOf(st *lockbox.Store) string {
 // save writes the store with a save-log row naming action, then records the
 // save as this Mac's last one. A record that cannot be written only warns.
 func (a *app) save(st *lockbox.Store, action string) error {
+	// Record this attune as the store's writer unless a newer one already
+	// wrote it, so an older Mac never lowers the version.
+	stored, err := st.WriterVersion()
+	if err != nil {
+		return err
+	}
+	if stored == "" || update.Newer(thisVersion, stored) {
+		if err := st.SetWriterVersion(thisVersion); err != nil {
+			return err
+		}
+	}
 	r, err := st.SaveLogged(a.host, action, a.now())
 	if err != nil {
 		return err
@@ -888,6 +903,7 @@ func (a *app) cmdSt(ref storeRef, args []string) int {
 	}
 	if st == nil {
 		grey("last save here", "unknown")
+		grey("written by", "unknown")
 	} else {
 		rec, state, err := st.CheckLastSave(a.lastSaveOf(st))
 		when := rec.At.Local().Format(time.DateTime)
@@ -904,7 +920,40 @@ func (a *app) cmdSt(ref storeRef, args []string) int {
 			rc = 1
 			kv("last save here", color.Red5(fmt.Sprintf("lost: %s at %s (generation %d); run it again", rec.Action, when, rec.Generation)))
 		}
+		switch v, err := st.WriterVersion(); {
+		case err != nil:
+			grey("written by", "unknown ("+err.Error()+")")
+		case v == "":
+			grey("written by", "none recorded")
+		case update.Newer(v, thisVersion):
+			kv("written by", color.Yel5(fmt.Sprintf("%s, newer than this attune (%s); run go install %s@%s", v, thisVersion, installPath, v)))
+		default:
+			grey("written by", v)
+		}
 	}
-	grey("drift", "run attune plan to compare with Azure")
+	a.updateStatus(kv, grey)
+	grey("drift", "run attune plan to compare with the providers")
 	return rc
+}
+
+// updateStatus prints st's update line: yellow with the install command when
+// the module proxy has a newer attune, grey otherwise. It never changes the
+// exit code.
+func (a *app) updateStatus(kv, grey func(label, value string)) {
+	r, err := a.checkUpdate()
+	checked := r.CheckedAt.Local().Format(time.DateTime)
+	switch {
+	case err != nil:
+		grey("update", "unknown ("+err.Error()+")")
+	case r.Skipped == update.SkippedRecentFailure && r.Latest == "":
+		grey("update", "unknown ("+r.Skipped+")")
+	case r.Skipped != "" && r.Skipped != update.SkippedRecentFailure:
+		grey("update", "skipped ("+r.Skipped+")")
+	case r.Available:
+		kv("update", color.Yel5(fmt.Sprintf("%s available; run go install %s@%s", r.Latest, installPath, r.Latest)))
+	case r.Latest == "":
+		grey("update", "none (checked "+checked+")")
+	default:
+		grey("update", fmt.Sprintf("none (%s is the latest, checked %s)", r.Latest, checked))
+	}
 }
