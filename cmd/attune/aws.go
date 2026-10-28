@@ -30,6 +30,23 @@ type CliExit struct {
 
 func (e *CliExit) Error() string { return "exit " + strconv.Itoa(e.Code) }
 
+// exitMeaning names the failure class an AWS CLI exit code stands for, so
+// an error can say what went wrong without showing the CLI's output, which
+// may echo its input.
+func exitMeaning(code int) string {
+	switch code {
+	case 252:
+		return ": the command line or a parameter value was invalid"
+	case 253:
+		return ": the CLI's configuration or credentials are invalid"
+	case 254:
+		return ": AWS rejected the request"
+	case 255:
+		return ": the CLI failed for another reason"
+	}
+	return ""
+}
+
 // CommandAwsCli shells out to the `aws` executable.
 type CommandAwsCli struct{}
 
@@ -190,7 +207,7 @@ func (p *AwsProvider) runWith(region string, input []byte, service, operation st
 	if err != nil {
 		var exit *CliExit
 		if errors.As(err, &exit) {
-			return fmt.Errorf("aws %s failed with exit %d", pair, exit.Code)
+			return fmt.Errorf("aws %s failed with exit %d%s", pair, exit.Code, exitMeaning(exit.Code))
 		}
 		return err
 	}
@@ -486,14 +503,13 @@ func (p *AwsProvider) HasSecretTarget(name string) (bool, error) {
 
 // DeliverSecret writes value to a Parameter Store SecureString in the
 // configured region with the account's default key, overwriting any
-// earlier value. The value travels only on standard input, inside the
-// CLI's input JSON, never on a command line.
+// earlier value. The value travels only on standard input, read by the
+// CLI through `--value file:///dev/stdin`, never on a command line; the
+// CLI keeps it byte for byte, so no newline is added. The CLI rejects its
+// whole input JSON on standard input, so the other fields are flags.
 func (p *AwsProvider) DeliverSecret(name string, value []byte) error {
-	input, err := json.Marshal(map[string]any{"Name": name, "Value": string(value), "Type": "SecureString", "Overwrite": true})
-	if err != nil {
-		return fmt.Errorf("encode parameter input: %w", err)
-	}
-	return p.runWith(p.region, input, "ssm", "put-parameter", nil, "--cli-input-json", "file:///dev/stdin")
+	return p.runWith(p.region, value, "ssm", "put-parameter", nil,
+		"--name", name, "--type", "SecureString", "--overwrite", "--value", "file:///dev/stdin")
 }
 
 var (

@@ -262,7 +262,7 @@ func TestAwsRunnerRefusesAndRedacts(t *testing.T) {
 		t.Errorf("unlisted command: err=%v calls=%v", err, cli.calls)
 	}
 	_, err = provider.HasZone("example.com")
-	if err == nil || err.Error() != "aws route53 list-hosted-zones-by-name failed with exit 254" {
+	if err == nil || err.Error() != "aws route53 list-hosted-zones-by-name failed with exit 254: AWS rejected the request" {
 		t.Errorf("failing call: %v", err)
 	}
 	if err != nil && strings.Contains(err.Error(), "AccessDenied") {
@@ -1258,18 +1258,18 @@ func TestParameterStoreSinkKeepsValueOffTheCommandLine(t *testing.T) {
 		t.Fatalf("DeliverSecret: %v", err)
 	}
 	call := cli.calls[0]
-	if strings.Join(call[:2], " ") != "ssm put-parameter" || cli.argAfter(call, "--cli-input-json") != "file:///dev/stdin" {
+	if strings.Join(call[:2], " ") != "ssm put-parameter" || cli.argAfter(call, "--value") != "file:///dev/stdin" ||
+		cli.argAfter(call, "--name") != "/app/host" || cli.argAfter(call, "--type") != "SecureString" || !slices.Contains(call, "--overwrite") {
 		t.Errorf("call = %v", call)
+	}
+	if slices.Contains(call, "--cli-input-json") {
+		t.Errorf("call uses the input JSON form the CLI rejects on stdin: %v", call)
 	}
 	if strings.Contains(strings.Join(call, " "), "one-time-value") {
 		t.Errorf("value on the command line: %v", call)
 	}
-	var input map[string]any
-	if err := json.Unmarshal(cli.inputs[0], &input); err != nil {
-		t.Fatalf("stdin is not JSON: %v", err)
-	}
-	if input["Name"] != "/app/host" || input["Value"] != "one-time-value" || input["Type"] != "SecureString" || input["Overwrite"] != true {
-		t.Errorf("stdin = %v", input)
+	if string(cli.inputs[0]) != "one-time-value" {
+		t.Errorf("stdin = %q, want the bare value with no newline", cli.inputs[0])
 	}
 
 	exists, err := provider.HasSecretTarget("/app/host")
@@ -1292,5 +1292,23 @@ func TestParameterStoreSinkKeepsValueOffTheCommandLine(t *testing.T) {
 	err = failing.DeliverSecret("/app/host", []byte("one-time-value"))
 	if err == nil || strings.Contains(err.Error(), "one-time-value") || !strings.Contains(err.Error(), "ssm put-parameter failed") {
 		t.Errorf("failed write: %v", err)
+	}
+}
+
+// TestCliExitNamesItsFailureClass: a failing call names the AWS CLI's
+// failure class for its exit code, and never the CLI's output.
+func TestCliExitNamesItsFailureClass(t *testing.T) {
+	for code, want := range map[int]string{
+		252: "aws ssm put-parameter failed with exit 252: the command line or a parameter value was invalid",
+		253: "aws ssm put-parameter failed with exit 253: the CLI's configuration or credentials are invalid",
+		254: "aws ssm put-parameter failed with exit 254: AWS rejected the request",
+		255: "aws ssm put-parameter failed with exit 255: the CLI failed for another reason",
+		1:   "aws ssm put-parameter failed with exit 1",
+	} {
+		provider, _ := newAwsFake(map[string][]fakeAwsResult{"ssm put-parameter": {{exit: code, out: "echoed one-time-value"}}})
+		err := provider.DeliverSecret("/app/host", []byte("one-time-value"))
+		if err == nil || err.Error() != want {
+			t.Errorf("exit %d: got %v, want %q", code, err, want)
+		}
 	}
 }

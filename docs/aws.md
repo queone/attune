@@ -6,9 +6,11 @@ shared by every provider are in [commands.md](commands.md); the [aws example](..
 ## Signing in and configuring
 
 The local `aws` CLI is the provider's only credential source and transport: every call is an allowlisted
-`aws <service> <operation>` invocation with JSON output, and a failing call is reported as its command and exit status with
-the process output dropped. Sign in with a signed-in AWS CLI profile: `aws login --profile <name>` under an organization that
-signs in through Identity Center, or `aws configure` with an access key otherwise.
+`aws <service> <operation>` invocation with JSON output, and a failing call is reported as its command, exit status, and
+the failure class the CLI documents for that status (252 an invalid command line, 253 invalid configuration or
+credentials, 254 a request AWS rejected, 255 anything else), with the process output dropped, since it may echo its
+input. Sign in with a signed-in AWS CLI profile: `aws login --profile <name>` under an organization that signs in through
+Identity Center, or `aws configure` with an access key otherwise.
 
 The `aws` block of `attune.yaml` holds optional `region` and `profile`, the CLI's own defaults otherwise.
 
@@ -88,8 +90,8 @@ newer image, replace it as above.
 An Azure `appRegistration` secret can name a Parameter Store parameter as its `deliverTo`, so `apply` writes a new or
 rotated client secret there instead of printing it (see [azure.md](azure.md)). The parameter is a `SecureString` in
 `aws.region`, or the CLI's region when that is unset, encrypted with the account's default key. attune reads only whether
-it exists, through `ssm describe-parameters`, and writes it through `ssm put-parameter` with the value inside the CLI's
-input JSON on standard input, never on a command line. attune never tags, lists, or deletes a parameter. A store whose
+it exists, through `ssm describe-parameters`, and writes it through `ssm put-parameter` with only the value on standard
+input, read through `--value file:///dev/stdin` and never placed on a command line. attune never tags, lists, or deletes a parameter. A store whose
 only `aws` use is a delivery target still grounds `aws`, before any provider plans, and prints its grounding line with
 `specs=0`.
 

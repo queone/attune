@@ -48,7 +48,7 @@ Integrated audit adoption is the only command-mediated phase exception. It can a
 - record stable system decisions here
 - prefer durable structure and interfaces over transient implementation detail
 - Specs pick their provider by name; the registry owns each provider's name, kinds, `attune.yaml` block, and constructor, so adding a provider touches only its own file plus one registry entry.
-- Each provider owns its credential source and allowlist. The Azure provider authenticates through the local `az` CLI and never keeps its own credential store. The AWS provider drives the local `aws` CLI as its only credential source and transport, through an exact allowlist of `<service> <operation>` pairs, and reduces a failing call to its command and exit status.
+- Each provider owns its credential source and allowlist. The Azure provider authenticates through the local `az` CLI and never keeps its own credential store. The AWS provider drives the local `aws` CLI as its only credential source and transport, through an exact allowlist of `<service> <operation>` pairs, and reduces a failing call to its command, exit status, and the failure class the CLI documents for that status, never its output.
 - It writes no local state, cache, or telemetry beyond its store, the remembered store path, `render` output, and `edit`'s private temporary file.
 - The Azure provider restricts requests to an ARM and Graph origin allowlist, and non-2xx response bodies are redacted wholesale before any diagnostic or error message.
 - An `appRegistration` may live in another tenant; the Azure provider keeps one Graph token per tenant, taken lazily
