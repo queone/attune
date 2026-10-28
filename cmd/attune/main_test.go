@@ -877,3 +877,50 @@ func TestDocsDescribeSecretDelivery(t *testing.T) {
 		}
 	}
 }
+
+// TestReferencedProviderPlansAndAppliesFirst — AT2 and AT4: a provider
+// holding an address referenced by one that sorts before it plans and
+// applies first, every plan block precedes every apply block, and the
+// record is sent with the address the other provider's apply returned.
+func TestReferencedProviderPlansAndAppliesFirst(t *testing.T) {
+	restore := color.SetEnabled(false)
+	defer restore()
+	snapshot := snapshotRegistry()
+	t.Cleanup(func() { restoreRegistry(snapshot) })
+	dns := &fakeProvider{name: "alpha", dns: []DnsRecord{}}
+	host := &fakeHost{fakeProvider: fakeProvider{name: "zeta"}, newIP: "203.0.113.20"}
+	Register(ProviderSpec{Name: "alpha", Kinds: validKinds, New: func(Settings, map[string]any) (LiveProvider, error) { return dns, nil }})
+	Register(ProviderSpec{Name: "zeta", Kinds: validKinds, New: func(Settings, map[string]any) (LiveProvider, error) { return host, nil }})
+	bundle := &Bundle{
+		Addresses: []StaticAddress{{Provider: "zeta", Name: "web", Instance: "web"}},
+		Dns:       []DnsRecord{{Provider: "alpha", Zone: "example.com", RecordType: "A", Name: "@", TTL: 300, Values: []string{"${staticAddress:web:publicIp}"}}},
+	}
+	var out, errb strings.Builder
+	a := &app{stdout: &out, stderr: &errb}
+	if code := a.runLive(cmdApply, Settings{PruneDNS: true}, nil, bundle, "/x/store"); code != 0 {
+		t.Fatalf("runLive exit %d\nstdout: %s\nstderr: %s", code, out.String(), errb.String())
+	}
+	wantErr := "attune: provider=zeta specs=1 authenticated=yes\nattune: provider=alpha specs=1 authenticated=yes\n"
+	if errb.String() != wantErr {
+		t.Errorf("stderr = %q\nwant %q", errb.String(), wantErr)
+	}
+	stdout := out.String()
+	order := []string{
+		"attune plan: provider=zeta\n", "staticAddress|web",
+		"attune plan: provider=alpha\n", "awaits ${staticAddress:web:publicIp}",
+		"attune apply: provider=zeta\n", "attune apply: provider=alpha\n",
+	}
+	last := -1
+	for _, want := range order {
+		idx := strings.Index(stdout, want)
+		if idx < 0 || idx < last {
+			t.Errorf("stdout lacks %q in order:\n%s", want, stdout)
+		}
+		if idx >= 0 {
+			last = idx
+		}
+	}
+	if len(dns.putDNS) != 1 || strings.Join(dns.putDNS[0].Values, ",") != "203.0.113.20" {
+		t.Errorf("record sent = %+v, want the new address", dns.putDNS)
+	}
+}

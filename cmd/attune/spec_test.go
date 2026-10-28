@@ -225,10 +225,38 @@ func TestReferencesValidateOffline(t *testing.T) {
 			t.Errorf("%s: err=%v, want it to contain %q and the record key", value, err, want)
 		}
 	}
-	registerDNSOnlyProvider(t)
-	other := specSource{name: "dns.yaml", content: []byte("provider: dnsonly\nkind: dnsRecordSet\nzone: example.com\ntype: A\nname: docs\nttl: 300\nvalues:\n  - '${staticAddress:example-host:publicIp}'\n")}
-	if _, err := loadSources([]specSource{address, other}, "azure"); err == nil || !strings.Contains(err.Error(), `target is on provider "aws", not "dnsonly"`) {
-		t.Errorf("cross-provider reference: %v", err)
+}
+
+// TestReferencesCrossProvidersOnce — AT1: a record may reference an address
+// on another provider; a name held on two providers and providers that
+// reference each other are refused with messages naming them.
+func TestReferencesCrossProvidersOnce(t *testing.T) {
+	snapshot := snapshotRegistry()
+	t.Cleanup(func() { restoreRegistry(snapshot) })
+	Register(ProviderSpec{Name: "hostb", Kinds: []string{"dnsRecordSet", "staticAddress"}})
+	address := func(provider, name string) specSource {
+		return specSource{name: provider + "-" + name + ".yaml", content: []byte("provider: " + provider + "\nkind: staticAddress\nname: " + name + "\ninstance: " + name + "\n")}
+	}
+	record := func(provider, host, target string) specSource {
+		return specSource{name: provider + "-dns-" + host + ".yaml", content: []byte("provider: " + provider + "\nkind: dnsRecordSet\nzone: example.com\ntype: A\nname: " + host + "\nttl: 300\nvalues:\n  - '${staticAddress:" + target + ":publicIp}'\n")}
+	}
+
+	bundle, err := loadSources([]specSource{address("aws", "web"), record("azure", "www", "web")}, "azure")
+	if err != nil {
+		t.Fatalf("cross-provider reference: %v", err)
+	}
+	if order, err := bundle.ProviderOrder(); err != nil || strings.Join(order, ",") != "aws,azure" {
+		t.Errorf("order = %v, %v", order, err)
+	}
+
+	_, err = loadSources([]specSource{address("aws", "web"), address("hostb", "web"), record("azure", "www", "web")}, "azure")
+	if err == nil || !strings.Contains(err.Error(), `a staticAddress named "web" exists on providers aws and hostb`) {
+		t.Errorf("ambiguous name: %v", err)
+	}
+
+	_, err = loadSources([]specSource{address("aws", "a1"), address("hostb", "b1"), record("aws", "x", "b1"), record("hostb", "y", "a1")}, "azure")
+	if err == nil || !strings.Contains(err.Error(), "providers aws and hostb reference each other") {
+		t.Errorf("cycle: %v", err)
 	}
 }
 

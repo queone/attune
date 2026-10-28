@@ -3,6 +3,7 @@
 | Version | Summary |
 |---------|---------|
 | Unreleased | |
+| 1.14.0 | AC13: attune v1.14.0 lets a record reference a resource on another provider |
 | 1.13.1 | attune v1.13.1 sends a delivered secret on stdin via --value, names CLI exits |
 | 1.13.0 | AC12: attune v1.13.0 delivers secrets to Parameter Store, genericizes store path |
 | 1.12.1 | attune v1.12.1 keeps parameter images stable, refuses unset vars, names 404s |

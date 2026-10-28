@@ -20,7 +20,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.13.1"
+	programVersion = "1.14.0"
 )
 
 var validKinds = []string{
@@ -207,8 +207,9 @@ type plannedProvider struct {
 	changes  []Change
 }
 
-// runLive grounds and plans every provider the bundle uses, in provider
-// name order, printing one grounding line and one plan block each. Only
+// runLive grounds and plans every provider the bundle uses, a referenced
+// provider before the providers that reference it and otherwise in name
+// order, printing one grounding line and one plan block each. Only
 // then does apply run, one confirmation block per provider in the same
 // order, so a provider that cannot be reached stops the run before any
 // other provider is changed.
@@ -265,8 +266,14 @@ func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle
 		}
 		sinks[name] = sink
 	}
+	order, err := bundle.ProviderOrder()
+	if err != nil {
+		a.errorf("%s", err)
+		return 1
+	}
+	outputs := NewOutputs()
 	var plans []plannedProvider
-	for _, name := range bundle.Providers() {
+	for _, name := range order {
 		provider, account, ok := ground(name)
 		if !ok {
 			return 1
@@ -283,6 +290,8 @@ func (a *app) runLive(cmd commandKind, settings Settings, config *Config, bundle
 			PruneHosts:          settings.PruneHosts,
 			PruneMonitoring:     settings.PruneMonitoring,
 			Sinks:               sinks,
+			Outputs:             outputs,
+			ReferencedKinds:     bundle.ReferencedKindsOn(name),
 		}
 		changes, err := Plan(provider, part, options)
 		if err != nil {

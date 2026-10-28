@@ -671,24 +671,116 @@ func pendingSummary(pending []Reference) string {
 	return "awaits " + strings.Join(parts, ", ")
 }
 
-// providerOf returns the provider of the spec of kind named name, when the
-// bundle holds one.
-func (b Bundle) providerOf(kind, name string) (string, bool) {
+// providersOf returns, sorted, every provider holding a spec of kind named
+// name.
+func (b Bundle) providersOf(kind, name string) []string {
+	var providers []string
+	add := func(provider, itemName string) {
+		if itemName == name && !slices.Contains(providers, provider) {
+			providers = append(providers, provider)
+		}
+	}
 	switch kind {
 	case "staticAddress":
 		for _, item := range b.Addresses {
-			if item.Name == name {
-				return item.Provider, true
-			}
+			add(item.Provider, item.Name)
 		}
 	case "instance":
 		for _, item := range b.Instances {
-			if item.Name == name {
-				return item.Provider, true
-			}
+			add(item.Provider, item.Name)
 		}
 	}
-	return "", false
+	sort.Strings(providers)
+	return providers
+}
+
+// referenceEdges lists each reference by the provider of the spec holding
+// it and the provider of the spec it names, skipping a name that resolves
+// to no provider or to several.
+func (b Bundle) referenceEdges() []referenceEdge {
+	var edges []referenceEdge
+	for _, item := range b.referencingValues() {
+		ref, ok, err := parseReference(item.value)
+		if err != nil || !ok {
+			continue
+		}
+		if targets := b.providersOf(ref.Kind, ref.Name); len(targets) == 1 {
+			edges = append(edges, referenceEdge{from: item.provider, to: targets[0], kind: ref.Kind})
+		}
+	}
+	return edges
+}
+
+// referenceEdge is one reference from a spec on provider from to a spec of
+// kind on provider to.
+type referenceEdge struct {
+	from string
+	to   string
+	kind string
+}
+
+// ProviderOrder returns the providers the bundle uses in the order a live
+// run plans and applies them: a provider holding a referenced spec comes
+// before every provider that references it, and otherwise name order
+// holds. Providers that reference each other are an error.
+func (b Bundle) ProviderOrder() ([]string, error) {
+	providers := b.Providers()
+	needs := map[string]map[string]bool{}
+	for _, edge := range b.referenceEdges() {
+		if edge.from == edge.to {
+			continue
+		}
+		if needs[edge.from] == nil {
+			needs[edge.from] = map[string]bool{}
+		}
+		needs[edge.from][edge.to] = true
+	}
+	var order []string
+	placed := map[string]bool{}
+	for len(order) < len(providers) {
+		next := ""
+		for _, name := range providers {
+			if placed[name] {
+				continue
+			}
+			ready := true
+			for dep := range needs[name] {
+				if !placed[dep] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				next = name
+				break
+			}
+		}
+		if next == "" {
+			var cycle []string
+			for _, name := range providers {
+				if !placed[name] {
+					cycle = append(cycle, name)
+				}
+			}
+			return nil, fmt.Errorf("providers %s reference each other, so no apply order exists; break the cycle with a literal value", strings.Join(cycle, " and "))
+		}
+		order = append(order, next)
+		placed[next] = true
+	}
+	return order, nil
+}
+
+// ReferencedKindsOn returns the kinds of provider's specs that any spec in
+// the bundle references, so that provider lists them for the run even when
+// its own specs would not.
+func (b Bundle) ReferencedKindsOn(provider string) map[string]bool {
+	kinds := map[string]bool{}
+	for _, edge := range b.referenceEdges() {
+		if edge.to == provider {
+			kinds[edge.kind] = true
+		}
+	}
+	return kinds
 }
 
 // BudgetAlert emails the listed addresses when actual or, with Forecast,

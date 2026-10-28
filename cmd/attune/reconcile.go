@@ -115,6 +115,10 @@ type Options struct {
 	Outputs *Outputs
 	// Sinks holds the grounded providers secrets are delivered to, by name.
 	Sinks map[string]SecretSink
+	// ReferencedKinds names the kinds of this provider's specs that specs
+	// anywhere in the run reference, so Plan lists them for the shared
+	// Outputs. Nil means the kinds this provider's own specs reference.
+	ReferencedKinds map[string]bool
 }
 
 // sink returns the grounded provider a delivery names.
@@ -422,7 +426,7 @@ func Plan(provider LiveProvider, bundle *Bundle, options *Options) ([]Change, er
 	if err := planHost(provider, bundle, options, &changes); err != nil {
 		return nil, err
 	}
-	if (wanted(options, "dnsRecordSet") && len(bundle.Dns) > 0) || (wanted(options, "healthCheck") && len(bundle.HealthChecks) > 0) {
+	if wanted(options, "dnsRecordSet") || wanted(options, "healthCheck") {
 		if err := recordReferencedOutputs(provider, bundle, options); err != nil {
 			return nil, err
 		}
@@ -1205,7 +1209,7 @@ func recordInstanceOutputs(options *Options, live []Instance) {
 	for _, item := range live {
 		outputs.Record("instance", item.Name, "id", item.ID)
 	}
-	outputs.listed["instance"] = true
+	outputs.listed[options.Provider+"|instance"] = true
 }
 
 func recordAddressOutputs(options *Options, live []StaticAddress) {
@@ -1213,17 +1217,22 @@ func recordAddressOutputs(options *Options, live []StaticAddress) {
 	for _, item := range live {
 		outputs.Record("staticAddress", item.Name, "publicIp", item.PublicIP)
 	}
-	outputs.listed["staticAddress"] = true
+	outputs.listed[options.Provider+"|staticAddress"] = true
 }
 
-// recordReferencedOutputs lists the kinds the bundle's records reference
-// when planning has not already listed them, such as under -k
-// dnsRecordSet, so references resolve from live state regardless of the
-// kind filter.
+// recordReferencedOutputs lists the kinds of this provider's specs that the
+// run references when planning has not already listed them, such as under
+// -k dnsRecordSet, so references resolve from live state regardless of the
+// kind filter. A provider lists only its own resources; a reference to
+// another provider's spec resolves from what that provider recorded.
 func recordReferencedOutputs(provider LiveProvider, bundle *Bundle, options *Options) error {
 	outputs := options.outputs()
-	for kind := range bundle.referencedKinds() {
-		if outputs.listed[kind] {
+	kinds := options.ReferencedKinds
+	if kinds == nil {
+		kinds = bundle.referencedKinds()
+	}
+	for kind := range kinds {
+		if outputs.listed[options.Provider+"|"+kind] {
 			continue
 		}
 		compute, ok := provider.(ComputeProvider)

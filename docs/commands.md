@@ -49,7 +49,8 @@ kinds, so `validate`, `add`, and `edit` reject an unknown provider, or a kind th
 any credential is read. Two providers are registered: `azure` supports every kind, and `aws` supports `dnsRecordSet` and the
 host and monitoring kinds.
 
-A live run groups the specs by provider in name order: it grounds and plans every provider first, printing one grounding line
+A live run groups the specs by provider, in name order except that a provider holding a spec another provider references
+comes before it: it grounds and plans every provider first, printing one grounding line
 and one `attune plan: provider=<name>` block each, and only then applies, one `attune apply: provider=<name>` block each, so
 a provider that cannot be reached stops the run before any other provider is changed. With one provider in the store the
 output is unchanged. A provider that receives a secret through `deliverTo` is grounded before any provider plans, so an
@@ -59,11 +60,13 @@ unreachable delivery target stops the run before any plan.
 
 A `dnsRecordSet` value can reference another spec's live output instead of holding a literal:
 `${staticAddress:<name>:publicIp}` or `${instance:<name>:id}`, the whole value and nothing else. `validate` checks each
-reference offline: its form, that the kind has that readable field, and that the named spec exists on the same provider; a
-reference across providers is rejected and stays a two-pass change. At plan time a reference to a resource that already
-exists resolves from live state, so a matching record shows no drift, and `-V` shows the resolved value. A reference to a
-resource the same run creates plans the record as `awaits ${...}`, and `apply` fills it after the host change lands, since
-host kinds run before DNS. A record whose reference cannot be filled fails `apply` before any DNS call. A value that opens
+reference offline: its form, that the kind has that readable field, and that the named spec exists on exactly one
+provider. A reference may cross providers, such as an `azure` record holding an `aws` address: the provider holding the
+address plans and applies first, and every provider shares the outputs it learns. A kind and name held on two providers,
+or providers that reference each other, are refused, since no single spec or apply order would satisfy them. At plan time
+a reference to a resource that already exists resolves from live state, so a matching record shows no drift, and `-V`
+shows the resolved value. A reference to a resource the same run creates plans the record as `awaits ${...}`, and
+`apply` fills it after the host change lands, since host kinds, and providers holding referenced specs, run first. A record whose reference cannot be filled fails `apply` before any DNS call. A value that opens
 `${` must be a reference; there is no escape for the literal text. A `healthCheck` `target` accepts the same references.
 
 ## What a live run prints

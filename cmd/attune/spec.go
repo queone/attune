@@ -299,8 +299,9 @@ func loadSources(sources []specSource, defaultProvider string) (*Bundle, error) 
 }
 
 // checkReferences validates every reference in the bundle's record values
-// offline: its form, that the kind has that readable field, and that the
-// named spec exists under the same provider.
+// offline: its form, that the kind has that readable field, that the named
+// spec exists on exactly one provider, and that no providers reference each
+// other, since a live run applies a referenced provider first.
 func checkReferences(bundle *Bundle) error {
 	for _, item := range bundle.referencingValues() {
 		ref, ok, err := parseReference(item.value)
@@ -317,13 +318,17 @@ func checkReferences(bundle *Bundle) error {
 		if !slices.Contains(fields, ref.Field) {
 			return fmt.Errorf("%s value %s: %s has no field %q; readable: %s", item.key, ref, ref.Kind, ref.Field, strings.Join(fields, ", "))
 		}
-		targetProvider, found := bundle.providerOf(ref.Kind, ref.Name)
-		if !found {
+		providers := bundle.providersOf(ref.Kind, ref.Name)
+		switch len(providers) {
+		case 0:
 			return fmt.Errorf("%s value %s: names no %s spec", item.key, ref, ref.Kind)
+		case 1:
+		default:
+			return fmt.Errorf("%s value %s: a %s named %q exists on providers %s; rename one so the reference names a single spec", item.key, ref, ref.Kind, ref.Name, strings.Join(providers, " and "))
 		}
-		if targetProvider != item.provider {
-			return fmt.Errorf("%s value %s: target is on provider %q, not %q; a reference must stay on one provider", item.key, ref, targetProvider, item.provider)
-		}
+	}
+	if _, err := bundle.ProviderOrder(); err != nil {
+		return err
 	}
 	return nil
 }

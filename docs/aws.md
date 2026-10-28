@@ -56,7 +56,8 @@ sensitivity, and DNS pruning defaults to enabled. TXT values are written unquote
 zones are created implicitly when a record set names one that does not exist, private hosted zones are ignored, and alias
 record sets are neither managed nor pruned.
 
-A record value may reference a host's live output, `${staticAddress:<name>:publicIp}` or `${instance:<name>:id}`; see
+A record value may reference a host's live output, `${staticAddress:<name>:publicIp}` or `${instance:<name>:id}`, from a
+record on `aws` or on another provider, such as an `azure` zone pointing at the host's address; see
 [commands.md](commands.md) for how references validate, plan, and apply.
 
 ## The host kinds

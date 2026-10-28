@@ -23,6 +23,7 @@ type fakeProvider struct {
 	apps            []AppRegistration
 	appNames        []string
 	secretsAdded    []string
+	putDNS          []DnsRecord
 	secretsRemoved  []string
 	roleDefinitions []RoleDefinition
 	resourceGroups  []ResourceGroup
@@ -75,7 +76,10 @@ func (p *fakeProvider) ListDNS(zone string) ([]DnsRecord, error) {
 	p.listed = append(p.listed, zone)
 	return p.dns, nil
 }
-func (p *fakeProvider) PutDNS(DnsRecord) error                { return nil }
+func (p *fakeProvider) PutDNS(r DnsRecord) error {
+	p.putDNS = append(p.putDNS, r)
+	return nil
+}
 func (p *fakeProvider) DeleteDNS(DnsRecord) error             { return nil }
 func (p *fakeProvider) ListGroupNames() ([]string, error)     { return p.groupNames, nil }
 func (p *fakeProvider) PutGroup(SecurityGroup) error          { return nil }
@@ -863,5 +867,53 @@ func TestDeliveredSecretAppliesAndRollsBack(t *testing.T) {
 	}
 	if err != nil && strings.Contains(err.Error(), "synthetic") {
 		t.Errorf("error carries the value: %v", err)
+	}
+}
+
+// fakeHost is a provider holding static addresses, counting how often its
+// addresses are listed and giving each new address newIP.
+type fakeHost struct {
+	fakeProvider
+	addresses    []StaticAddress
+	addressLists int
+	newIP        string
+}
+
+func (h *fakeHost) ResolveImage(image string) (string, error) { return image, nil }
+func (h *fakeHost) ListInstances() ([]Instance, error)        { return nil, nil }
+func (h *fakeHost) PutInstance(Instance) (string, error)      { return "i-0new", nil }
+func (h *fakeHost) DeleteInstance(Instance) error             { return nil }
+func (h *fakeHost) PutAddress(StaticAddress) (string, error)  { return h.newIP, nil }
+func (h *fakeHost) DeleteAddress(StaticAddress) error         { return nil }
+func (h *fakeHost) ListAddresses() ([]StaticAddress, error) {
+	h.addressLists++
+	return h.addresses, nil
+}
+
+// TestReferenceResolvesFromAnotherProvidersLiveState — AT3: under -k
+// dnsRecordSet the provider holding the address still lists it into the
+// shared outputs, and a record on another provider that matches it plans
+// no change, without that provider listing any address.
+func TestReferenceResolvesFromAnotherProvidersLiveState(t *testing.T) {
+	bundle := &Bundle{
+		Addresses: []StaticAddress{{Provider: "zeta", Name: "web", Instance: "web"}},
+		Dns:       []DnsRecord{{Provider: "alpha", Zone: "example.com", RecordType: "A", Name: "@", TTL: 300, Values: []string{"${staticAddress:web:publicIp}"}}},
+	}
+	host := &fakeHost{addresses: []StaticAddress{{Name: "web", PublicIP: "203.0.113.10"}}}
+	outputs := NewOutputs()
+	hostChanges, err := Plan(host, bundle.ForProvider("zeta"), &Options{Provider: "zeta", Kind: "dnsRecordSet", Outputs: outputs, ReferencedKinds: bundle.ReferencedKindsOn("zeta")})
+	if err != nil {
+		t.Fatalf("Plan zeta: %v", err)
+	}
+	if len(hostChanges) != 0 || host.addressLists != 1 {
+		t.Errorf("zeta changes %v, address lists %d, want none and 1", hostChanges, host.addressLists)
+	}
+	dns := &fakeProvider{dns: []DnsRecord{{Zone: "example.com", RecordType: "A", Name: "@", TTL: 300, Values: []string{"203.0.113.10"}}}}
+	changes, err := Plan(dns, bundle.ForProvider("alpha"), &Options{Provider: "alpha", Kind: "dnsRecordSet", PruneDNS: true, Outputs: outputs, ReferencedKinds: bundle.ReferencedKindsOn("alpha")})
+	if err != nil {
+		t.Fatalf("Plan alpha: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("matching record planned %+v", changes)
 	}
 }
