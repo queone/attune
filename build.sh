@@ -407,12 +407,27 @@ EOF
   fi
 
   printf '\n%s\n' "$(yel7 '==> Automatically fix code for API/language changes')"
-  local fix_out
+  # go fix rewrites silently, so list the files its -diff mode names first.
+  local fix_diff fix_out fix_files='' fix_line fix_path
+  fix_diff=$(go fix -diff "${scopes[@]}" 2>/dev/null) || true
+  while IFS= read -r fix_line; do
+    case "$fix_line" in
+    '--- '*' (old)')
+      fix_path="${fix_line#--- }"
+      fix_path="${fix_path% (old)}"
+      fix_files+="${fix_path#"$PWD"/}"$'\n'
+      ;;
+    esac
+  done < <(printf '%s\n' "$fix_diff")
   fix_out=$(go fix "${scopes[@]}" 2>&1) || true
-  if _is_blank "$fix_out"; then
+  if ! _is_blank "$fix_out"; then
+    printf '%s\n' "$fix_out" | write_indented
+  fi
+  if _is_blank "$fix_files"; then
     printf '    %s\n' 'No fixes applied.'
   else
-    printf '%s\n' "$fix_out" | write_indented
+    printf '    %s\n' 'Fixed files:'
+    printf '%s' "$fix_files" | write_indented
   fi
 
   printf '\n%s\n' "$(yel7 '==> Check code for potential issues')"
