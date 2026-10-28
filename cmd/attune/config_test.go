@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -162,5 +163,24 @@ func TestPruneMonitoringParsesFromConfig(t *testing.T) {
 	}
 	if Resolve(&Config{}, Overrides{}).PruneMonitoring {
 		t.Error("PruneMonitoring on without config")
+	}
+}
+
+// TestUnsetConfigVariableIsRefused: an unset ${VAR} in attune.yaml fails
+// with a message naming it, a variable set to "" still expands, and a
+// full-line comment is never expanded.
+func TestUnsetConfigVariableIsRefused(t *testing.T) {
+	os.Unsetenv("ATTUNE_TEST_UNSET")
+	t.Cleanup(func() { os.Unsetenv("ATTUNE_TEST_UNSET") })
+	_, err := ParseConfig([]byte("provider: azure\nazure:\n  subscription: ${ATTUNE_TEST_UNSET}\n"))
+	if err == nil || !strings.Contains(err.Error(), "$ATTUNE_TEST_UNSET, which is not set") {
+		t.Errorf("unset variable: got %v", err)
+	}
+	t.Setenv("ATTUNE_TEST_EMPTY", "")
+	if _, err := ParseConfig([]byte("provider: azure\nazure:\n  resource_group: ${ATTUNE_TEST_EMPTY}\n")); err != nil {
+		t.Errorf("empty variable: %v", err)
+	}
+	if _, err := ParseConfig([]byte("# uses $ATTUNE_TEST_UNSET when set\nprovider: azure\n")); err != nil {
+		t.Errorf("comment line: %v", err)
 	}
 }

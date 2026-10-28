@@ -472,7 +472,9 @@ func TestAwsPlansAgainstRecordedHost(t *testing.T) {
 // mutation.
 func TestAwsReplaceIsPlannedAndRefused(t *testing.T) {
 	provider, cli := newAwsFake(awsFullAccount(awsSecurityGroupJSON, awsInstanceJSON("ami-0old", "example")))
-	changes, err := Plan(provider, awsHostBundle(), &Options{Provider: "aws"})
+	bundle := awsHostBundle()
+	bundle.Instances[0].Image = "ami-0example"
+	changes, err := Plan(provider, bundle, &Options{Provider: "aws"})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
@@ -1212,5 +1214,27 @@ func TestAwsDocNamesHealthCheckGuardrailEntries(t *testing.T) {
 		if !strings.Contains(string(readme), want) {
 			t.Errorf("docs/aws.md lacks %s", want)
 		}
+	}
+}
+
+// TestAwsImageParameterIsResolvedOnlyAtCreate: an instance whose image is a
+// parameter path plans no change against a running instance on an older
+// image, and plan never reads the parameter for it, so a new release of
+// the parameter's image is not drift.
+func TestAwsImageParameterIsResolvedOnlyAtCreate(t *testing.T) {
+	provider, cli := newAwsFake(awsFullAccount(awsSecurityGroupJSON, awsInstanceJSON("ami-0old", "example")))
+	bundle := awsHostBundle()
+	if isImageID(bundle.Instances[0].Image) {
+		t.Fatalf("fixture image %q must be a parameter path", bundle.Instances[0].Image)
+	}
+	changes, err := Plan(provider, bundle, &Options{Provider: "aws"})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("changes = %v, want none", changeKeys(changes))
+	}
+	if slices.Contains(cli.pairs(), "ssm get-parameter") {
+		t.Errorf("plan read the image parameter for a running instance: %v", cli.pairs())
 	}
 }

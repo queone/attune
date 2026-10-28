@@ -66,7 +66,7 @@ The provider reconciles a host through five provider-neutral kinds:
 - `bucket`: region, a public access block that defaults to fully blocked, and `encryption` of `aes256` or a key ARN.
 - `firewall`: ingress rules of `protocol`, `fromPort`, `toPort`, and `sources` that are CIDRs or other firewall names, in
   the default VPC unless `vpc` names one by its Name tag.
-- `instance`: `type`, `image` as an AMI id or an SSM parameter path resolved at plan time, `role`, `firewall`,
+- `instance`: `type`, `image` as an AMI id or an SSM parameter path resolved when the instance is created, `role`, `firewall`,
   `imdsv2Required` defaulting on, `rootDisk` size, type, and encryption, and tags with merge semantics.
 - `staticAddress`: attached to an `instance` by name. The applied line for a new `staticAddress` shows the public address.
 
@@ -78,7 +78,10 @@ seconds to make a new profile visible, and an address waits up to a minute for i
 cannot attach before then.
 
 A change to an immutable field, an instance's `type`, `image`, or root disk type and encryption, or a bucket's `region`,
-plans as a `! replace` line and `apply` refuses it, naming the field: remove the spec, apply, then add it back.
+plans as a `! replace` line and `apply` refuses it, naming the field: remove the spec, apply, then add it back. An `image`
+given as a parameter path, such as Canonical's `current` Ubuntu image, is never compared with a running instance, since the
+parameter moves with every release; only a literal AMI id that differs plans a replace. To move a running instance to a
+newer image, replace it as above.
 
 ## What attune can prune
 

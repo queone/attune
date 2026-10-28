@@ -967,13 +967,17 @@ func planHost(provider LiveProvider, bundle *Bundle, options *Options, changes *
 		for _, item := range bundle.Instances {
 			desired[item.Name] = true
 			resolved := item
-			image, err := compute.ResolveImage(item.Image)
-			if err != nil {
-				return err
-			}
-			resolved.Image = image
 			current, found := findInstance(live, item.Name)
 			if !found {
+				// A parameter path such as Canonical's `current` image is
+				// resolved only here, at create: it moves on every
+				// release, so comparing it with a running instance would
+				// plan a replace each time.
+				image, err := compute.ResolveImage(item.Image)
+				if err != nil {
+					return err
+				}
+				resolved.Image = image
 				*changes = append(*changes, change("instance", ActionCreate, "instance|"+item.Name, "missing", Target{Kind: TargetInstance, Instance: resolved}))
 				continue
 			}
@@ -981,7 +985,7 @@ func planHost(provider LiveProvider, bundle *Bundle, options *Options, changes *
 			if current.Type != resolved.Type {
 				immutable = append(immutable, "type")
 			}
-			if current.Image != resolved.Image {
+			if isImageID(item.Image) && current.Image != item.Image {
 				immutable = append(immutable, "image")
 			}
 			if current.RootDisk.Type != resolved.RootDisk.Type {
@@ -1487,4 +1491,10 @@ func secretDiffs(live []Secret, secret Secret) []FieldDiff {
 		diffs = append(diffs, FieldDiff{Field: "expires", Old: l.Expires.UTC().Format(time.RFC3339), New: fmt.Sprintf("%d days from now", secret.ValidForDays)})
 	}
 	return diffs
+}
+
+// isImageID reports whether an instance spec's image is a literal AMI id
+// rather than a parameter path resolved at create.
+func isImageID(image string) bool {
+	return strings.HasPrefix(image, "ami-")
 }

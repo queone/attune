@@ -10,7 +10,9 @@ Live commands need `az login`. The `azure` block of `attune.yaml` holds `subscri
 `ARM_SUBSCRIPTION_ID` and `ARM_RESOURCE_GROUP` environment variables override it, and flags override both.
 
 Requests are restricted to an ARM/Graph origin allowlist, and non-2xx provider responses are redacted wholesale before
-reaching any diagnostic or error message.
+reaching any diagnostic or error message. A missing subscription or resource group is named in the error instead, from
+ARM's own error code, and any other ARM 404 carries ` (subscription=<id> resource-group=<name>)`, so a stale default
+subscription after a fresh `az login` is visible without `-d`.
 
 ## Kinds
 

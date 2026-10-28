@@ -286,6 +286,9 @@ func (p *AzureProvider) request(method, url string, body any) (any, error) {
 		return nil, err
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
+		if strings.HasPrefix(url, armBase+"/") {
+			return nil, p.armStatusError(resp)
+		}
 		return nil, statusError(resp)
 	}
 	if len(resp.Body) == 0 {
@@ -454,13 +457,46 @@ func (p *AzureProvider) HasZone(zone string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if resp.Status == 404 {
+	if resp.Status == 404 && armErrorCode(resp.Body) != "SubscriptionNotFound" && armErrorCode(resp.Body) != "ResourceGroupNotFound" {
 		return false, nil
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
-		return false, statusError(resp)
+		return false, p.armStatusError(resp)
 	}
 	return true, nil
+}
+
+// armErrorCode returns the error code of an ARM error response, such as
+// SubscriptionNotFound. The code is ARM's own fixed identifier, never
+// tenant data, so it may be read before the body is redacted.
+func armErrorCode(body []byte) string {
+	var parsed struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &parsed) != nil {
+		return ""
+	}
+	return parsed.Error.Code
+}
+
+// armStatusError renders a non-2xx ARM response as a redacted error. A 404
+// names the subscription and resource group the run targets, since a
+// missing subscription, such as a stale `az login` default, 404s on every
+// call and the redacted body says nothing.
+func (p *AzureProvider) armStatusError(resp *HTTPResponse) error {
+	switch armErrorCode(resp.Body) {
+	case "SubscriptionNotFound":
+		return fmt.Errorf("subscription %s was not found; check `azure.subscription` in attune.yaml, ARM_SUBSCRIPTION_ID, and `az account show`", p.Subscription)
+	case "ResourceGroupNotFound":
+		return fmt.Errorf("resource group %s was not found in subscription %s; check `azure.resource_group` in attune.yaml", p.resourceGroup, p.Subscription)
+	}
+	err := statusError(resp)
+	if resp.Status == 404 {
+		return fmt.Errorf("%w (subscription=%s resource-group=%s)", err, p.Subscription, p.resourceGroup)
+	}
+	return err
 }
 
 func (p *AzureProvider) ListDNS(zone string) ([]DnsRecord, error) {

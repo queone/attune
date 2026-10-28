@@ -547,3 +547,29 @@ func TestAppCallsInAnotherTenantUseThatTenantsToken(t *testing.T) {
 		t.Errorf("a request was sent without a token: %v", urls)
 	}
 }
+
+// TestArmNotFoundNamesTheTarget: a zone check against a missing
+// subscription or resource group fails with a message naming it instead of
+// planning a new zone, a plain missing zone still reads as absent, and any
+// other ARM 404 carries the subscription and resource group.
+func TestArmNotFoundNamesTheTarget(t *testing.T) {
+	respond := func(code string) *AzureProvider {
+		var urls []string
+		body := `{"error":{"code":"` + code + `","message":"tenant detail"}}`
+		return NewAzureProviderWith(syntheticCli{}, &syntheticTransport{urls: &urls, responses: []*HTTPResponse{{Status: 404, Body: []byte(body)}}}, "sub02", "rg-1")
+	}
+	if _, err := respond("SubscriptionNotFound").HasZone("example.com"); err == nil || !strings.Contains(err.Error(), "subscription sub02 was not found") {
+		t.Errorf("missing subscription: got %v", err)
+	}
+	if _, err := respond("ResourceGroupNotFound").HasZone("example.com"); err == nil || !strings.Contains(err.Error(), "resource group rg-1 was not found in subscription sub02") {
+		t.Errorf("missing resource group: got %v", err)
+	}
+	exists, err := respond("ResourceNotFound").HasZone("example.com")
+	if err != nil || exists {
+		t.Errorf("missing zone: exists=%t err=%v", exists, err)
+	}
+	_, err = respond("SomethingElse").ListDNS("example.com")
+	if err == nil || !strings.Contains(err.Error(), "subscription=sub02 resource-group=rg-1") || strings.Contains(err.Error(), "tenant detail") {
+		t.Errorf("other 404: got %v", err)
+	}
+}

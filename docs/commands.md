@@ -28,6 +28,11 @@ Configuration is the store's `attune.yaml` entry; precedence is flag, environmen
 `azure` with `subscription` and `resource_group`, and `aws` with optional `region` and `profile`, the CLI's own defaults
 otherwise.
 
+`attune.yaml` may reference environment variables as `$VAR` or `${VAR}`. A reference to an unset variable stops every
+command that reads the configuration, naming the variable, rather than expanding to nothing: an empty `subscription` would
+fall back to whatever subscription `az login` last chose. A variable set to the empty string expands to it, and full-line
+comments are never expanded.
+
 DNS pruning defaults to enabled. Identity, role, resource-group, host, and monitoring pruning default to disabled and must be
 enabled explicitly with their corresponding flags or configuration.
 

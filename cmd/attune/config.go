@@ -60,9 +60,29 @@ type Settings struct {
 }
 
 // expandEnvironment expands $VAR and ${VAR} references in input using the
-// current process environment. An unresolved variable expands to "". A lone
-// trailing "$" or "$" followed by a non-identifier character is left as-is.
+// current process environment. An unset variable is refused rather than
+// expanded to "", since an empty subscription silently falls back to the
+// CLI's default; a variable set to "" expands to "". Full-line YAML
+// comments are copied unexpanded. A lone trailing "$" or "$" followed by a
+// non-identifier character is left as-is.
 func expandEnvironment(input string) (string, error) {
+	var output strings.Builder
+	for line := range strings.SplitAfterSeq(input, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			output.WriteString(line)
+			continue
+		}
+		expanded, err := expandLine(line)
+		if err != nil {
+			return "", err
+		}
+		output.WriteString(expanded)
+	}
+	return output.String(), nil
+}
+
+// expandLine expands the variable references in one line of attune.yaml.
+func expandLine(input string) (string, error) {
 	var output strings.Builder
 	index := 0
 	for index < len(input) {
@@ -102,7 +122,11 @@ func expandEnvironment(input string) (string, error) {
 			index++
 			continue
 		}
-		output.WriteString(os.Getenv(name))
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			return "", fmt.Errorf("attune.yaml references $%s, which is not set; export it, or replace the reference with its value in attune.yaml", name)
+		}
+		output.WriteString(value)
 		index += consumed
 	}
 	return output.String(), nil

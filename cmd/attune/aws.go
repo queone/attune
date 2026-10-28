@@ -1199,7 +1199,7 @@ func (i awsInstance) rootVolumeID() string {
 // ResolveImage returns an image id unchanged and resolves a parameter path
 // through SSM.
 func (p *AwsProvider) ResolveImage(image string) (string, error) {
-	if strings.HasPrefix(image, "ami-") {
+	if isImageID(image) {
 		return image, nil
 	}
 	var result struct {
