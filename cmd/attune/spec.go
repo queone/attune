@@ -605,7 +605,7 @@ func loadSpecInto(bundle *Bundle, kind, provider string, m map[string]any) (stri
 		return "firewall|" + item.Name, nil
 
 	case "instance":
-		if err := rejectUnknown(m, []string{"kind", "provider", "name", "type", "image", "role", "firewall", "imdsv2Required", "rootDisk", "tags"}, ""); err != nil {
+		if err := rejectUnknown(m, []string{"kind", "provider", "name", "type", "image", "role", "firewall", "imdsv2Required", "metadataHopLimit", "rootDisk", "tags"}, ""); err != nil {
 			return "", err
 		}
 		name, err := requiredString(m, "name")
@@ -631,6 +631,15 @@ func loadSpecInto(bundle *Bundle, kind, provider string, m map[string]any) (stri
 		imds, err := optionalBool(m, "imdsv2Required")
 		if err != nil {
 			return "", err
+		}
+		var hopLimit int64
+		if raw, ok := m["metadataHopLimit"]; ok && raw != nil {
+			if hopLimit, err = requiredI64(m, "metadataHopLimit"); err != nil {
+				return "", err
+			}
+			if hopLimit < 1 || hopLimit > 64 {
+				return "", fmt.Errorf("instance metadataHopLimit must be from 1 to 64, not %d", hopLimit)
+			}
 		}
 		rawDisk, ok := m["rootDisk"]
 		if !ok || rawDisk == nil {
@@ -664,9 +673,10 @@ func loadSpecInto(bundle *Bundle, kind, provider string, m map[string]any) (stri
 		}
 		item := Instance{
 			Provider: provider, Name: name, Type: instanceType, Image: image, Role: role, Firewall: firewall,
-			Imdsv2Required: imds == nil || *imds,
-			RootDisk:       RootDisk{Size: size, Type: diskType, Encrypted: encrypted == nil || *encrypted},
-			Tags:           tags,
+			Imdsv2Required:   imds == nil || *imds,
+			MetadataHopLimit: int(hopLimit),
+			RootDisk:         RootDisk{Size: size, Type: diskType, Encrypted: encrypted == nil || *encrypted},
+			Tags:             tags,
 		}
 		bundle.Instances = append(bundle.Instances, item)
 		return "instance|" + item.Name, nil

@@ -70,7 +70,10 @@ The provider reconciles a host through five provider-neutral kinds:
 - `firewall`: ingress rules of `protocol`, `fromPort`, `toPort`, and `sources` that are CIDRs or other firewall names, in
   the default VPC unless `vpc` names one by its Name tag.
 - `instance`: `type`, `image` as an AMI id or an SSM parameter path resolved when the instance is created, `role`, `firewall`,
-  `imdsv2Required` defaulting on, `rootDisk` size, type, and encryption, and tags with merge semantics.
+  `imdsv2Required` defaulting on, `metadataHopLimit` from 1 to 64, `rootDisk` size, type, and encryption, and tags with
+  merge semantics. `metadataHopLimit` is unmanaged when unset, so the image's default stays; `1` keeps containers on a
+  Docker bridge network from reaching the metadata service and the instance role's credentials. The hop limit bounds only
+  IMDSv2 token responses, so it protects only with `imdsv2Required` on. A change applies in place, without a restart.
 - `staticAddress`: attached to an `instance` by name. The applied line for a new `staticAddress` shows the public address.
 
 Plan and apply run them in dependency order, `iamRole`, `bucket`, `firewall`, `instance`, `staticAddress`, then DNS, and

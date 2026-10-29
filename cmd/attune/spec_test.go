@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -176,7 +177,7 @@ func TestHostKindsValidateShapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("instance: %v", err)
 	}
-	if i := bundle.Instances[0]; !i.Imdsv2Required || i.RootDisk.Type != "gp3" || !i.RootDisk.Encrypted {
+	if i := bundle.Instances[0]; !i.Imdsv2Required || i.MetadataHopLimit != 0 || i.RootDisk.Type != "gp3" || !i.RootDisk.Encrypted {
 		t.Errorf("instance defaults = %+v", i)
 	}
 	bundle, err = load("provider: aws\nkind: bucket\nname: b\nregion: us-east-1\nencryption: aes256\n")
@@ -197,6 +198,32 @@ func TestHostKindsValidateShapes(t *testing.T) {
 	_, err = load("provider: azure\nkind: instance\nname: h\ntype: t4g.small\nimage: ami-0example\nrootDisk:\n  size: 20\n")
 	if err == nil || err.Error() != `provider "azure" does not support kind "instance"` {
 		t.Errorf("instance under azure: %v", err)
+	}
+}
+
+// TestInstanceMetadataHopLimitValidates — AT1, AT2: an instance's
+// metadataHopLimit parses from 1 to 64 and refuses an out-of-range value or
+// a string with the field named.
+func TestInstanceMetadataHopLimitValidates(t *testing.T) {
+	load := func(hopLimit string) (*Bundle, error) {
+		doc := "provider: aws\nkind: instance\nname: h\ntype: t4g.small\nimage: ami-0example\nmetadataHopLimit: " + hopLimit + "\nrootDisk:\n  size: 20\n"
+		return loadSources([]specSource{{name: "spec.yaml", content: []byte(doc)}}, "azure")
+	}
+	for _, valid := range []string{"1", "64"} {
+		bundle, err := load(valid)
+		if err != nil || strconv.Itoa(bundle.Instances[0].MetadataHopLimit) != valid {
+			t.Errorf("metadataHopLimit %s: %+v %v", valid, bundle, err)
+		}
+	}
+	cases := map[string]string{
+		"0":   "instance metadataHopLimit must be from 1 to 64, not 0",
+		"65":  "instance metadataHopLimit must be from 1 to 64, not 65",
+		`"1"`: "metadataHopLimit must be an integer",
+	}
+	for value, want := range cases {
+		if _, err := load(value); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("metadataHopLimit %s: err=%v, want %q", value, err, want)
+		}
 	}
 }
 

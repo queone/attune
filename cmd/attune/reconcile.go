@@ -1025,6 +1025,7 @@ func planHost(provider LiveProvider, bundle *Bundle, options *Options, changes *
 				continue
 			}
 			if current.Role != resolved.Role || current.Firewall != resolved.Firewall || current.Imdsv2Required != resolved.Imdsv2Required ||
+				(resolved.MetadataHopLimit != 0 && current.MetadataHopLimit != resolved.MetadataHopLimit) ||
 				current.RootDisk.Size != resolved.RootDisk.Size || !tagsSatisfy(resolved.Tags, current.Tags) {
 				updated := resolved
 				updated.ID = current.ID
@@ -1190,6 +1191,9 @@ func instanceDiffs(current, desired Instance) []FieldDiff {
 	scalar("role", current.Role, desired.Role)
 	scalar("firewall", current.Firewall, desired.Firewall)
 	scalar("imdsv2Required", strconv.FormatBool(current.Imdsv2Required), strconv.FormatBool(desired.Imdsv2Required))
+	if desired.MetadataHopLimit != 0 {
+		scalar("metadataHopLimit", strconv.Itoa(current.MetadataHopLimit), strconv.Itoa(desired.MetadataHopLimit))
+	}
 	scalar("rootDisk.size", strconv.FormatInt(current.RootDisk.Size, 10), strconv.FormatInt(desired.RootDisk.Size, 10))
 	var keys []string
 	for k := range desired.Tags {

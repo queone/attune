@@ -404,6 +404,7 @@ func TestAwsCreatesHostInDependencyOrder(t *testing.T) {
 		"ec2 associate-address":                  {{out: `{"AssociationId":"eipassoc-0new"}`}},
 	})
 	bundle := awsHostBundle()
+	bundle.Instances[0].MetadataHopLimit = 1
 	bundle.Dns = []DnsRecord{{Provider: "aws", Zone: "example.com", RecordType: "A", Name: "docs", TTL: 300, Values: []string{"192.0.2.10"}}}
 	changes, err := Plan(provider, bundle, &Options{Provider: "aws", PruneDNS: true})
 	if err != nil {
@@ -438,7 +439,7 @@ func TestAwsCreatesHostInDependencyOrder(t *testing.T) {
 			run = call
 		}
 	}
-	for _, want := range []string{`{"Name":"example-host"}`, "sg-0new", "ami-0example", `"HttpTokens":"required"`, `"VolumeSize":20`, `"Encrypted":true`} {
+	for _, want := range []string{`{"Name":"example-host"}`, "sg-0new", "ami-0example", `"HttpTokens":"required"`, `"HttpPutResponseHopLimit":1`, `"VolumeSize":20`, `"Encrypted":true`} {
 		if !strings.Contains(strings.Join(run, " "), want) {
 			t.Errorf("run-instances argv lacks %q: %v", want, run)
 		}
@@ -470,6 +471,72 @@ func TestAwsPlansAgainstRecordedHost(t *testing.T) {
 	}
 	if d := changes[1].Diffs; len(d) != 1 || d[0].Field != "tag project" || d[0].Old != "old" || d[0].New != "example" {
 		t.Errorf("instance diffs = %+v", d)
+	}
+}
+
+// TestAwsMetadataOptionsOmitUnmanagedHopLimit — AT3: a launch sends the hop
+// limit only when the spec sets it.
+func TestAwsMetadataOptionsOmitUnmanagedHopLimit(t *testing.T) {
+	if got, want := metadataOptionsJSON(true, 0), `{"HttpTokens":"required","HttpEndpoint":"enabled"}`; got != want {
+		t.Errorf("unset hop limit = %s, want %s", got, want)
+	}
+	if got, want := metadataOptionsJSON(false, 2), `{"HttpTokens":"optional","HttpEndpoint":"enabled","HttpPutResponseHopLimit":2}`; got != want {
+		t.Errorf("hop limit 2 = %s, want %s", got, want)
+	}
+}
+
+// TestAwsManagesMetadataHopLimit — AT4, AT5, AT6: a declared hop limit that
+// differs from the live one plans one instance update shown as old -> new,
+// and apply sets it in place with one metadata call; an unset or matching
+// hop limit plans nothing.
+func TestAwsManagesMetadataHopLimit(t *testing.T) {
+	live := func(hopLimit string) string {
+		return strings.Replace(awsInstanceJSON("ami-0example", "example"), `"MetadataOptions":{"HttpTokens":"required"}`,
+			`"MetadataOptions":{"HttpTokens":"required","HttpPutResponseHopLimit":`+hopLimit+`}`, 1)
+	}
+	for _, c := range []struct {
+		name, live string
+		spec       int
+	}{{"unset against 2", "2", 0}, {"1 against 1", "1", 1}} {
+		provider, _ := newAwsFake(awsFullAccount(awsSecurityGroupJSON, live(c.live)))
+		bundle := awsHostBundle()
+		bundle.Instances[0].MetadataHopLimit = c.spec
+		if changes, err := Plan(provider, bundle, &Options{Provider: "aws"}); err != nil || len(changes) != 0 {
+			t.Errorf("%s: changes=%v err=%v", c.name, changeKeys(changes), err)
+		}
+	}
+
+	recorded := awsFullAccount(awsSecurityGroupJSON, live("2"))
+	recorded["ec2 modify-instance-metadata-options"] = []fakeAwsResult{{out: `{}`}}
+	provider, cli := newAwsFake(recorded)
+	bundle := awsHostBundle()
+	bundle.Instances[0].MetadataHopLimit = 1
+	changes, err := Plan(provider, bundle, &Options{Provider: "aws"})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if got := changeKeys(changes); strings.Join(got, ";") != "update instance|example-host" {
+		t.Fatalf("changes = %v", got)
+	}
+	if plain := color.ClearCode(renderPlanBlock("aws", changes, true)); !strings.Contains(plain, "metadataHopLimit: 2 -> 1") {
+		t.Errorf("verbose plan = %q, want metadataHopLimit: 2 -> 1", plain)
+	}
+	before := len(cli.calls)
+	if err := Apply(provider, changes, &Options{}, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	var metadataCalls [][]string
+	for _, call := range cli.calls[before:] {
+		switch call[0] + " " + call[1] {
+		case "ec2 modify-instance-metadata-options":
+			metadataCalls = append(metadataCalls, call)
+		case "ec2 stop-instances", "ec2 start-instances", "ec2 reboot-instances", "ec2 terminate-instances", "ec2 run-instances":
+			t.Errorf("apply ran %s %s", call[0], call[1])
+		}
+	}
+	if len(metadataCalls) != 1 || cli.argAfter(metadataCalls[0], "--http-put-response-hop-limit") != "1" ||
+		cli.argAfter(metadataCalls[0], "--http-tokens") != "required" {
+		t.Errorf("metadata calls = %v, want one with --http-put-response-hop-limit 1", metadataCalls)
 	}
 }
 

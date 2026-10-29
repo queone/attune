@@ -679,9 +679,12 @@ func TestStShowsUpdateStatus(t *testing.T) {
 			"v99.0.0 available; run go install github.com/queone/attune/cmd/attune@v99.0.0"},
 		{update.Result{Current: thisVersion, Latest: thisVersion, CheckedAt: checked}, nil, "none (" + thisVersion + " is the latest, checked " + when + ")"},
 		{update.Result{Current: thisVersion, CheckedAt: checked}, nil, "none (checked " + when + ")"},
+		{update.Result{Current: thisVersion, Latest: "v0.0.1", CheckedAt: checked}, nil, "none (checked " + when + ")"},
 		{update.Result{Current: thisVersion, Skipped: "NO_UPDATE_CHECK is set"}, nil, "skipped (NO_UPDATE_CHECK is set)"},
 		{update.Result{Current: thisVersion, Skipped: update.SkippedRecentFailure}, nil, "unknown (recent check failed)"},
 		{update.Result{Current: thisVersion}, errors.New("proxy timed out"), "unknown (proxy timed out)"},
+		{update.Result{Current: thisVersion}, errors.Join(errors.New("proxy timed out"), errors.New("write update cache: disk full")),
+			"unknown (proxy timed out; write update cache: disk full)"},
 	}
 	for _, c := range cases {
 		h.update, h.updateErr = c.result, c.err

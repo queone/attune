@@ -705,6 +705,9 @@ func TestAwsExampleHasOneOfEveryHostKind(t *testing.T) {
 	if got := bundle.Providers(); len(got) != 1 || got[0] != "aws" {
 		t.Errorf("providers = %v, want [aws]", got)
 	}
+	if len(bundle.Instances) == 1 && bundle.Instances[0].MetadataHopLimit != 1 {
+		t.Errorf("instance metadataHopLimit = %d, want 1", bundle.Instances[0].MetadataHopLimit)
+	}
 }
 
 // TestPruneHostsFlagParsesAndDefaultsOff — AT6: -H and --prune-hosts parse

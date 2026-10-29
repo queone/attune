@@ -468,19 +468,21 @@ type RootDisk struct {
 }
 
 // Instance is a virtual machine named by tag. Image is an image id or a
-// parameter path the provider resolves. Tags use merge semantics. ID is the
+// parameter path the provider resolves. MetadataHopLimit of zero in a spec
+// leaves the live hop limit unmanaged. Tags use merge semantics. ID is the
 // live identifier, empty in a spec.
 type Instance struct {
-	Provider       string
-	ID             string
-	Name           string
-	Type           string
-	Image          string
-	Role           string
-	Firewall       string
-	Imdsv2Required bool
-	RootDisk       RootDisk
-	Tags           map[string]string
+	Provider         string
+	ID               string
+	Name             string
+	Type             string
+	Image            string
+	Role             string
+	Firewall         string
+	Imdsv2Required   bool
+	MetadataHopLimit int
+	RootDisk         RootDisk
+	Tags             map[string]string
 }
 
 // StaticAddress is a public address named by tag and attached to an

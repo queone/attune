@@ -937,23 +937,24 @@ func (a *app) cmdSt(ref storeRef, args []string) int {
 }
 
 // updateStatus prints st's update line: yellow with the install command when
-// the module proxy has a newer attune, grey otherwise. It never changes the
-// exit code.
+// the module proxy has a newer attune, grey otherwise. It names a release as
+// the latest only when that release is the running one, since the proxy can
+// lag behind a new tag. It never changes the exit code.
 func (a *app) updateStatus(kv, grey func(label, value string)) {
 	r, err := a.checkUpdate()
 	checked := r.CheckedAt.Local().Format(time.DateTime)
 	switch {
 	case err != nil:
-		grey("update", "unknown ("+err.Error()+")")
+		grey("update", "unknown ("+strings.ReplaceAll(err.Error(), "\n", "; ")+")")
 	case r.Skipped == update.SkippedRecentFailure && r.Latest == "":
 		grey("update", "unknown ("+r.Skipped+")")
 	case r.Skipped != "" && r.Skipped != update.SkippedRecentFailure:
 		grey("update", "skipped ("+r.Skipped+")")
 	case r.Available:
 		kv("update", color.Yel5(fmt.Sprintf("%s available; run go install %s@%s", r.Latest, installPath, r.Latest)))
-	case r.Latest == "":
-		grey("update", "none (checked "+checked+")")
-	default:
+	case r.Latest == r.Current:
 		grey("update", fmt.Sprintf("none (%s is the latest, checked %s)", r.Latest, checked))
+	default:
+		grey("update", "none (checked "+checked+")")
 	}
 }

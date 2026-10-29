@@ -1236,7 +1236,8 @@ type awsInstance struct {
 		GroupID string `json:"GroupId"`
 	} `json:"SecurityGroups"`
 	MetadataOptions struct {
-		HttpTokens string `json:"HttpTokens"`
+		HttpTokens              string `json:"HttpTokens"`
+		HttpPutResponseHopLimit int    `json:"HttpPutResponseHopLimit"`
 	} `json:"MetadataOptions"`
 	RootDeviceName      string `json:"RootDeviceName"`
 	BlockDeviceMappings []struct {
@@ -1340,7 +1341,8 @@ func (p *AwsProvider) describeInstances(ids []string) ([]awsInstance, error) {
 func (p *AwsProvider) instanceFrom(inst awsInstance) (Instance, error) {
 	h := p.host()
 	instance := Instance{ID: inst.InstanceID, Name: inst.tag("Name"), Type: inst.InstanceType, Image: inst.ImageID,
-		Imdsv2Required: inst.MetadataOptions.HttpTokens == "required", Tags: map[string]string{}}
+		Imdsv2Required: inst.MetadataOptions.HttpTokens == "required", MetadataHopLimit: inst.MetadataOptions.HttpPutResponseHopLimit,
+		Tags: map[string]string{}}
 	h.instanceIDs[instance.Name] = inst.InstanceID
 	h.instNames[inst.InstanceID] = instance.Name
 	if inst.IamInstanceProfile != nil {
@@ -1410,10 +1412,15 @@ func (p *AwsProvider) instanceID(name string) (string, error) {
 	return "", fmt.Errorf("instance %q is not one attune manages", name)
 }
 
-func metadataOptionsJSON(imdsv2 bool) string {
+// metadataOptionsJSON renders run-instances' metadata options, with the hop
+// limit only when the spec manages it.
+func metadataOptionsJSON(imdsv2 bool, hopLimit int) string {
 	tokens := "optional"
 	if imdsv2 {
 		tokens = "required"
+	}
+	if hopLimit != 0 {
+		return `{"HttpTokens":"` + tokens + `","HttpEndpoint":"enabled","HttpPutResponseHopLimit":` + strconv.Itoa(hopLimit) + `}`
 	}
 	return `{"HttpTokens":"` + tokens + `","HttpEndpoint":"enabled"}`
 }
@@ -1442,7 +1449,7 @@ func (p *AwsProvider) PutInstance(instance Instance) (string, error) {
 		mapping, _ := json.Marshal([]map[string]any{{"DeviceName": images.Images[0].RootDeviceName, "Ebs": map[string]any{
 			"VolumeSize": instance.RootDisk.Size, "VolumeType": instance.RootDisk.Type, "Encrypted": instance.RootDisk.Encrypted, "DeleteOnTermination": true}}})
 		args := []string{"--image-id", instance.Image, "--instance-type", instance.Type, "--count", "1",
-			"--metadata-options", metadataOptionsJSON(instance.Imdsv2Required),
+			"--metadata-options", metadataOptionsJSON(instance.Imdsv2Required, instance.MetadataHopLimit),
 			"--block-device-mappings", string(mapping),
 			"--tag-specifications", awsTagSpec("instance", instance.Name, instance.Tags)}
 		if instance.Role != "" {
@@ -1492,12 +1499,17 @@ func (p *AwsProvider) updateInstance(instance, current Instance, raw awsInstance
 			return err
 		}
 	}
-	if current.Imdsv2Required != instance.Imdsv2Required {
+	hopLimitDiffers := instance.MetadataHopLimit != 0 && current.MetadataHopLimit != instance.MetadataHopLimit
+	if current.Imdsv2Required != instance.Imdsv2Required || hopLimitDiffers {
 		tokens := "optional"
 		if instance.Imdsv2Required {
 			tokens = "required"
 		}
-		if err := p.run("ec2", "modify-instance-metadata-options", nil, "--instance-id", instance.ID, "--http-tokens", tokens, "--http-endpoint", "enabled"); err != nil {
+		args := []string{"--instance-id", instance.ID, "--http-tokens", tokens, "--http-endpoint", "enabled"}
+		if instance.MetadataHopLimit != 0 {
+			args = append(args, "--http-put-response-hop-limit", strconv.Itoa(instance.MetadataHopLimit))
+		}
+		if err := p.run("ec2", "modify-instance-metadata-options", nil, args...); err != nil {
 			return err
 		}
 	}

@@ -7,6 +7,7 @@ image: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
 role: example-host
 firewall: example-host
 imdsv2Required: true
+metadataHopLimit: 1
 rootDisk:
   size: 20
   type: gp3
