@@ -3,6 +3,7 @@
 | Version | Summary |
 |---------|---------|
 | Unreleased | |
+| 1.17.0 | AC19: attune v1.17.0 creates a health check's topic first; denials name the fix |
 | 1.16.1 | attune v1.16.1 stops a plan filtered to instances showing false firewall drift |
 | 1.16.0 | AC17+AC18: attune v1.16.0 manages instance metadata hop limit; fixes update line |
 | 1.15.3 | AC16 adopt Govna governance files v0.85.0 |

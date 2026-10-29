@@ -128,3 +128,8 @@ The advanced-mode region guardrail denies the health check's SNS and CloudWatch 
 `cloudwatch:TagResource`, and `sns:*` to the `NotAction` list of the policy's `us-east-1` statement, `UsEast1Partitional`,
 from the management account's Organizations console. AWS wrote that policy and may rewrite it on a plan or mode change, so
 repeat the edit if a health check apply is denied again.
+
+attune cannot see the guardrail before it writes, so apply creates the check's topic and subscriptions before the check
+itself: an SNS denial stops the apply before anything exists. A rejected SNS or CloudWatch call in `us-east-1` names the
+edit above in its error. A CloudWatch denial leaves the topic and the tagged check without their alarm, and the next apply
+after the edit finds them and adds the alarm.

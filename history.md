@@ -2,6 +2,21 @@
 
 > One section per release, newest first: what the release added, changed, removed, or deferred in the product, its design, and its code, and why. Governance, toolchain, and release mechanics stay in `CHANGELOG.md` and git. Settled design is in `arch.md`. Search it to learn why a release changed the product.
 
+## v1.17.0
+
+Changed:
+- A health check's apply creates its SNS topic and subscriptions before the Route 53 check, so an SNS denial leaves nothing.
+- A rejected SNS or CloudWatch call in `us-east-1` names the region guardrail fix in its error.
+
+Decisions:
+- attune does not probe the guardrail before writes; it discards CLI error text, and SNS and CloudWatch have no dry-run.
+- A CloudWatch denial leaves the topic and tagged check; the next apply after the guardrail edit adds the alarm.
+- A topic left by a failed Route 53 create stays out of scope; prune cannot find it if the spec goes first.
+
+Risks:
+- No organization with an unedited guardrail was available to test the denial live.
+- The hint omits `cloudwatch:DescribeAlarms`, which plan reads and the documented edit does not list.
+
 ## v1.16.1
 
 Changed:

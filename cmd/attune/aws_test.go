@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1301,6 +1302,104 @@ func TestAwsDocNamesHealthCheckGuardrailEntries(t *testing.T) {
 	for _, want := range []string{"`cloudwatch:PutMetricAlarm`", "`cloudwatch:DeleteAlarms`", "`cloudwatch:TagResource`", "`sns:*`"} {
 		if !strings.Contains(string(readme), want) {
 			t.Errorf("docs/aws.md lacks %s", want)
+		}
+	}
+	for _, want := range []string{"subscriptions before the check", "next apply\nafter the edit finds them and adds the alarm"} {
+		if !strings.Contains(string(readme), want) {
+			t.Errorf("docs/aws.md lacks %q", want)
+		}
+	}
+}
+
+// awsAlertChainAccount records a new health check's apply calls, with
+// overrides for the pairs a test makes fail.
+func awsAlertChainAccount(overrides map[string][]fakeAwsResult) map[string][]fakeAwsResult {
+	recorded := map[string][]fakeAwsResult{
+		"sns create-topic":                 {{out: `{"TopicArn":"` + awsTopicARN + `"}`}},
+		"sns list-subscriptions-by-topic":  {{out: `{"Subscriptions":[]}`}},
+		"sns subscribe":                    {{out: `{"SubscriptionArn":"pending confirmation"}`}},
+		"route53 create-health-check":      {{out: `{"HealthCheck":{"Id":"hc-new"}}`}},
+		"route53 change-tags-for-resource": {{out: ``}},
+		"cloudwatch put-metric-alarm":      {{out: ``}},
+	}
+	maps.Copy(recorded, overrides)
+	return recorded
+}
+
+func newAlertChainCheck() HealthCheck {
+	check := awsMonitoringBundle().HealthChecks[0]
+	check.Target = "203.0.113.10"
+	return check
+}
+
+// TestAwsHealthCheckCreatesTopicBeforeCheck — AT1: a new check's topic and
+// subscriptions come before the Route 53 check, and the alarm comes last.
+func TestAwsHealthCheckCreatesTopicBeforeCheck(t *testing.T) {
+	provider, cli := newAwsFake(awsAlertChainAccount(nil))
+	if err := provider.PutHealthCheck(newAlertChainCheck()); err != nil {
+		t.Fatalf("PutHealthCheck: %v", err)
+	}
+	want := []string{"sns create-topic", "sns list-subscriptions-by-topic", "sns subscribe",
+		"route53 create-health-check", "route53 change-tags-for-resource", "cloudwatch put-metric-alarm"}
+	if got := cli.pairs(); strings.Join(got, ";") != strings.Join(want, ";") {
+		t.Errorf("calls = %v\nwant %v", got, want)
+	}
+}
+
+// TestAwsHealthCheckDenialNamesTheGuardrailFix — AT2, AT3: a rejected
+// create-topic stops before the Route 53 check, a rejected alarm leaves a
+// check the next plan completes, and both errors name the guardrail fix.
+func TestAwsHealthCheckDenialNamesTheGuardrailFix(t *testing.T) {
+	provider, cli := newAwsFake(awsAlertChainAccount(map[string][]fakeAwsResult{"sns create-topic": {{exit: 254}}}))
+	err := provider.PutHealthCheck(newAlertChainCheck())
+	for _, want := range []string{"sns create-topic", "AWS rejected the request", "UsEast1Partitional"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("denied topic: err=%v, want %q", err, want)
+		}
+	}
+	if slices.Contains(cli.pairs(), "route53 create-health-check") {
+		t.Errorf("denied topic still created the check: %v", cli.pairs())
+	}
+
+	provider, _ = newAwsFake(awsAlertChainAccount(map[string][]fakeAwsResult{"cloudwatch put-metric-alarm": {{exit: 254}}}))
+	err = provider.PutHealthCheck(newAlertChainCheck())
+	for _, want := range []string{"cloudwatch put-metric-alarm", "UsEast1Partitional"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("denied alarm: err=%v, want %q", err, want)
+		}
+	}
+
+	partial := awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTPS", 3))
+	partial["cloudwatch describe-alarms"] = []fakeAwsResult{{out: `{"MetricAlarms":[]}`}}
+	provider, _ = newAwsFake(partial)
+	grounded(t, provider)
+	changes, err := Plan(provider, awsMonitoringBundle(), &Options{Provider: "aws", PruneDNS: true})
+	if err != nil || strings.Join(changeKeys(changes), ";") != "update healthCheck|example-site" {
+		t.Errorf("plan after a denied alarm: changes=%v err=%v", changeKeys(changes), err)
+	}
+}
+
+// TestAwsGuardrailHintOnlyForRejectedAlarmRegionCalls — AT4: a rejected
+// SNS read in us-east-1 names the guardrail fix; another exit code or a
+// rejected Route 53 call does not.
+func TestAwsGuardrailHintOnlyForRejectedAlarmRegionCalls(t *testing.T) {
+	cases := []struct {
+		name, pair string
+		exit       int
+		hint       bool
+	}{
+		{"rejected list-topics", "sns list-topics", 254, true},
+		{"failed list-topics", "sns list-topics", 255, false},
+		{"rejected list-health-checks", "route53 list-health-checks", 254, false},
+	}
+	for _, c := range cases {
+		recorded := awsFullAccountWithMonitoring(awsBudgetNotifications, awsHealthCheckJSON("HTTPS", 3))
+		recorded[c.pair] = []fakeAwsResult{{exit: c.exit}}
+		provider, _ := newAwsFake(recorded)
+		grounded(t, provider)
+		_, err := Plan(provider, awsMonitoringBundle(), &Options{Provider: "aws", PruneDNS: true})
+		if err == nil || !strings.Contains(err.Error(), c.pair) || strings.Contains(err.Error(), "UsEast1Partitional") != c.hint {
+			t.Errorf("%s: err=%v, want hint=%v", c.name, err, c.hint)
 		}
 	}
 }

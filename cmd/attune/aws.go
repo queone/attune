@@ -47,6 +47,17 @@ func exitMeaning(code int) string {
 	return ""
 }
 
+// guardrailHint completes a rejected SNS or CloudWatch call in the alarm
+// region with the region guardrail fix, since attune discards the CLI's
+// output and cannot tell a guardrail denial from another rejection.
+func guardrailHint(region, service string, code int) string {
+	if code != 254 || region != awsAlarmRegion || (service != "sns" && service != "cloudwatch") {
+		return ""
+	}
+	return "; if the organization's region guardrail denies it, add cloudwatch:PutMetricAlarm, cloudwatch:DeleteAlarms, " +
+		"cloudwatch:TagResource, and sns:* to the NotAction list of the UsEast1Partitional statement, as docs/aws.md describes"
+}
+
 // CommandAwsCli shells out to the `aws` executable.
 type CommandAwsCli struct{}
 
@@ -205,7 +216,7 @@ func (p *AwsProvider) runWith(region string, input []byte, service, operation st
 	}
 	if err != nil {
 		if exit, ok := errors.AsType[*CliExit](err); ok {
-			return fmt.Errorf("aws %s failed with exit %d%s", pair, exit.Code, exitMeaning(exit.Code))
+			return fmt.Errorf("aws %s failed with exit %d%s%s", pair, exit.Code, exitMeaning(exit.Code), guardrailHint(region, service, exit.Code))
 		}
 		return err
 	}
@@ -2020,40 +2031,13 @@ func healthCheckConfigJSON(check HealthCheck) string {
 	return string(b)
 }
 
-// PutHealthCheck creates or updates the Route 53 check with its target
-// already resolved, then brings the topic, its email subscriptions, and the
-// alarm to the spec, all in us-east-1 beside the check's metric.
+// PutHealthCheck brings the topic and its email subscriptions to the spec,
+// then creates or updates the Route 53 check with its target already
+// resolved, then the alarm, which needs the check's id. The topic, its
+// subscriptions, and the alarm live in us-east-1 beside the check's metric.
+// The topic comes first so that a region guardrail denying SNS stops the
+// apply before anything exists.
 func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
-	if check.ID == "" {
-		var created struct {
-			HealthCheck struct {
-				ID string `json:"Id"`
-			} `json:"HealthCheck"`
-		}
-		if err := p.run("route53", "create-health-check", &created, "--caller-reference", p.reference(), "--health-check-config", healthCheckConfigJSON(check)); err != nil {
-			return err
-		}
-		check.ID = created.HealthCheck.ID
-		if err := p.run("route53", "change-tags-for-resource", nil, "--resource-type", "healthcheck", "--resource-id", check.ID, "--add-tags", awsTagsJSON(check.Name)); err != nil {
-			return err
-		}
-	} else {
-		args := []string{"--health-check-id", check.ID, "--port", strconv.FormatInt(check.Port, 10), "--failure-threshold", strconv.FormatInt(check.FailureThreshold, 10)}
-		if isAddressOrReference(check.Target) {
-			args = append(args, "--ip-address", check.Target)
-			if check.Host != "" {
-				args = append(args, "--fully-qualified-domain-name", check.Host)
-			}
-		} else {
-			args = append(args, "--fully-qualified-domain-name", check.Target)
-		}
-		if check.Path != "" {
-			args = append(args, "--resource-path", check.Path)
-		}
-		if err := p.run("route53", "update-health-check", nil, args...); err != nil {
-			return err
-		}
-	}
 	var topic struct {
 		ARN string `json:"TopicArn"`
 	}
@@ -2093,6 +2077,36 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 			if err := p.runIn(awsAlarmRegion, "sns", "unsubscribe", nil, "--subscription-arn", arn); err != nil {
 				return err
 			}
+		}
+	}
+	if check.ID == "" {
+		var created struct {
+			HealthCheck struct {
+				ID string `json:"Id"`
+			} `json:"HealthCheck"`
+		}
+		if err := p.run("route53", "create-health-check", &created, "--caller-reference", p.reference(), "--health-check-config", healthCheckConfigJSON(check)); err != nil {
+			return err
+		}
+		check.ID = created.HealthCheck.ID
+		if err := p.run("route53", "change-tags-for-resource", nil, "--resource-type", "healthcheck", "--resource-id", check.ID, "--add-tags", awsTagsJSON(check.Name)); err != nil {
+			return err
+		}
+	} else {
+		args := []string{"--health-check-id", check.ID, "--port", strconv.FormatInt(check.Port, 10), "--failure-threshold", strconv.FormatInt(check.FailureThreshold, 10)}
+		if isAddressOrReference(check.Target) {
+			args = append(args, "--ip-address", check.Target)
+			if check.Host != "" {
+				args = append(args, "--fully-qualified-domain-name", check.Host)
+			}
+		} else {
+			args = append(args, "--fully-qualified-domain-name", check.Target)
+		}
+		if check.Path != "" {
+			args = append(args, "--resource-path", check.Path)
+		}
+		if err := p.run("route53", "update-health-check", nil, args...); err != nil {
+			return err
 		}
 	}
 	return p.runIn(awsAlarmRegion, "cloudwatch", "put-metric-alarm", nil,
