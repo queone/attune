@@ -1349,8 +1349,17 @@ func (p *AwsProvider) instanceFrom(inst awsInstance) (Instance, error) {
 		instance.Role = arnName(inst.IamInstanceProfile.Arn)
 	}
 	if len(inst.SecurityGroups) > 0 {
+		// A plan filtered to instances has not listed firewalls, so list
+		// them before treating the group as one attune does not manage.
 		id := inst.SecurityGroups[0].GroupID
-		if name, ok := h.groupNames[id]; ok {
+		name, ok := h.groupNames[id]
+		if !ok {
+			if _, err := p.ListFirewalls(); err != nil {
+				return instance, err
+			}
+			name, ok = h.groupNames[id]
+		}
+		if ok {
 			instance.Firewall = name
 		} else {
 			instance.Firewall = id

@@ -540,6 +540,21 @@ func TestAwsManagesMetadataHopLimit(t *testing.T) {
 	}
 }
 
+// TestAwsInstanceOnlyPlanNamesTheFirewall — a plan filtered to instances
+// reads the live security group as its firewall name, so a matching
+// account plans nothing.
+func TestAwsInstanceOnlyPlanNamesTheFirewall(t *testing.T) {
+	provider, _ := newAwsFake(awsFullAccount(awsSecurityGroupJSON, awsInstanceJSON("ami-0example", "example")))
+	changes, err := Plan(provider, awsHostBundle(), &Options{Provider: "aws", Kind: "instance"})
+	if err != nil || len(changes) != 0 {
+		var diffs []FieldDiff
+		for _, c := range changes {
+			diffs = append(diffs, c.Diffs...)
+		}
+		t.Fatalf("instance-only plan: changes=%v diffs=%+v err=%v", changeKeys(changes), diffs, err)
+	}
+}
+
 // TestAwsReplaceIsPlannedAndRefused — AT4: a live instance on another image
 // plans a replace naming the field, and Apply refuses it before any
 // mutation.

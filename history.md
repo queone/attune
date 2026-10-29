@@ -2,6 +2,15 @@
 
 > One section per release, newest first: what the release added, changed, removed, or deferred in the product, its design, and its code, and why. Governance, toolchain, and release mechanics stay in `CHANGELOG.md` and git. Settled design is in `arch.md`. Search it to learn why a release changed the product.
 
+## v1.16.1
+
+Changed:
+- An instance's live security group shows as its firewall name in a plan filtered with `-k instance`.
+- Before, such a plan compared the group id with the spec's name and reported false firewall drift.
+
+Risks:
+- The fault existed since v1.9.0; an unfiltered plan listed firewalls first and hid it.
+
 ## v1.16.0
 
 Added:

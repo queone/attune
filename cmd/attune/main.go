@@ -22,7 +22,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.16.0"
+	programVersion = "1.16.1"
 	modulePath     = "github.com/queone/attune"
 	installPath    = modulePath + "/cmd/attune"
 )
