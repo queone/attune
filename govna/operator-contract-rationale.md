@@ -24,6 +24,8 @@ Concrete wording helps both people and agents identify the required result befor
 
 `Govna contract loaded.` is a human-visible readiness signal emitted only after internalizing `AGENTS.md` and before the first substantive governed action. Its narrow trigger keeps it meaningful; it detects rather than prevents contract skipping.
 
+Right after the checkpoint, the agent compares the canon version that `govna version` prints with `canon_version` in `govna/metadata.txt` and suggests `govna audit` when the installed canon is newer. Session entry is when a stale repository matters most, because every later rule comes from the adopted canon. The comparison reads two local values, and the release check behind `govna version` runs at most once a day with a two-second limit, so session entry stays fast. The question waits until the end of the response, so it never blocks the requested work. `govna version` runs the installed govna, not a repository command, so the explicit-wording rule for repository commands does not apply to it.
+
 ## Audit Verification
 
 `govna audit` complements session framing by detecting canon incoherence, consumer adoption drift, and local-rule decay across sessions and repositories.

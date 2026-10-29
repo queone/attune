@@ -47,9 +47,10 @@ Every emitted audit AC uses these shared explanations:
 | `preserve` | The preserve list says to keep the repository's version. |
 | `clear-sync` | The file still matches the previously installed Govna version and is safe to update. |
 | `ambiguity` | Govna cannot safely choose between updating and keeping the file. |
-| `target-has-no-canon` | The file is absent from the selected current canon, but specific repository evidence connects it to Govna. |
+| `target-has-no-canon` | The file is absent from the selected current canon but specific repository evidence connects it to Govna. |
 | `migration-required` | A required Govna control file is missing and must be added through the AC. |
 | `retired-link` | A Govna link that Claude Code no longer needs and the AC deletes. |
+| `force-sync` | This file's governed structure always syncs to canon, regardless of local edits or the preserve list. |
 
 `govna/metadata.txt` gets metadata-specific handling layered on top. An absent file is forced to `migration-required` regardless of the byte-comparison result (see Migration-required items). A present `canon_version` must use strict `vMAJOR.MINOR.PATCH` form. When the target version is lower than embedded canon and replacing only that field makes the whole file byte-equal to rendered canon, the file is forced to `clear-sync` regardless of git history or a preserve-registry entry. Other metadata differences remain whole-file review items. A malformed version fails before AC emission; a target version newer than embedded canon also fails and directs the operator to upgrade govna rather than downgrade consumer metadata.
 

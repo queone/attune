@@ -127,4 +127,20 @@ CHANGELOG row shape (enforced by prep's insertion code and by convention):
 - Versions are unprefixed (`0.29.0`, not `v0.29.0`).
 - Do not backfill historical tags or invent alternative shapes (Keep-a-Changelog, sectioned `## vX.Y.Z`, etc.).
 
+## Release History Format
+
+- Apply this format to every `history.md` section that Package writes.
+- Start a new `history.md` with the heading `# <repository name> History` and the paragraph below.
+- Head each release section `## vMAJOR.MINOR.PATCH`, newest release first.
+- Order the labels `Added:`, `Changed:`, `Removed:`, `Deferred:`, `Decisions:`, `Risks:`.
+- Write each label on its own line, followed by its bullets.
+- Omit an empty label.
+- Write condensed Simplified Technical English.
+- Keep one fact per bullet.
+- Keep each bullet to at most 25 words.
+- Start at the first release after adoption.
+- Skip back-filling earlier releases.
+
+> One section per release, newest first: what the release added, changed, removed, or deferred in the product, its design, and its code, and why. Governance, toolchain, and release mechanics stay in `CHANGELOG.md` and git. Settled design is in `arch.md`. Search it to learn why a release changed the product.
+
 ## Project Practices
