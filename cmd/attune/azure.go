@@ -565,10 +565,10 @@ func (p *AzureProvider) ListGroupNames() ([]string, error) {
 	return p.listNames("groups")
 }
 
-func (p *AzureProvider) PutGroup(group SecurityGroup) error {
+func (p *AzureProvider) PutGroup(group SecurityGroup) (string, error) {
 	id, err := p.findID("groups", "displayName", group.Name)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if id == "" {
 		created, err := p.request("POST", graphBase+"/groups", map[string]any{
@@ -578,19 +578,22 @@ func (p *AzureProvider) PutGroup(group SecurityGroup) error {
 			"securityEnabled": true,
 		})
 		if err != nil {
-			return err
+			return "", err
 		}
 		obj, _ := created.(map[string]any)
 		newID, _ := obj["id"].(string)
 		if newID == "" {
-			return fmt.Errorf("graph group response omitted id")
+			return "", fmt.Errorf("graph group response omitted id")
 		}
 		id = newID
 	}
 	if err := p.syncRefs(fmt.Sprintf("/groups/%s/owners", id), group.Owners); err != nil {
-		return err
+		return "", err
 	}
-	return p.syncRefs(fmt.Sprintf("/groups/%s/members", id), group.Members)
+	if err := p.syncRefs(fmt.Sprintf("/groups/%s/members", id), group.Members); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func (p *AzureProvider) DeleteGroup(name string) error {
@@ -754,12 +757,12 @@ func (p *AzureProvider) ListAppNames(tenant string) ([]string, error) {
 // PutApp creates or updates app in its tenant: the managed sign-in fields
 // go in the create body or one PATCH, then owners and the service
 // principal are synced. Secrets are separate changes.
-func (p *AzureProvider) PutApp(app AppRegistration) error {
+func (p *AzureProvider) PutApp(app AppRegistration) (string, error) {
 	defer p.in(app.Tenant)()
 	filter := percentEncode(fmt.Sprintf("displayName eq '%s'", app.Name))
 	found, err := p.request("GET", fmt.Sprintf("%s/applications?$select=id,appId&$filter=%s", graphBase, filter), nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	obj, _ := found.(map[string]any)
 	items, _ := obj["value"].([]any)
@@ -771,7 +774,7 @@ func (p *AzureProvider) PutApp(app AppRegistration) error {
 		p.rememberAppID(app, id)
 		if signIn != nil {
 			if _, err := p.request("PATCH", fmt.Sprintf("%s/applications/%s", graphBase, id), signIn); err != nil {
-				return err
+				return "", err
 			}
 		}
 	} else {
@@ -779,27 +782,27 @@ func (p *AzureProvider) PutApp(app AppRegistration) error {
 		maps.Copy(body, signIn)
 		created, err := p.request("POST", graphBase+"/applications", body)
 		if err != nil {
-			return err
+			return "", err
 		}
 		createdObj, _ := created.(map[string]any)
 		id, appID = jsonString(createdObj, "id"), jsonString(createdObj, "appId")
 		p.rememberAppID(app, id)
 	}
 	if err := p.syncRefs(fmt.Sprintf("/applications/%s/owners", id), app.Owners); err != nil {
-		return err
+		return "", err
 	}
 	if app.ServicePrincipal {
 		exists, err := p.servicePrincipalExists(appID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !exists {
 			if _, err := p.request("POST", graphBase+"/servicePrincipals", map[string]any{"appId": appID}); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
-	return nil
+	return appID, nil
 }
 
 func (p *AzureProvider) DeleteApp(tenant, name string) error {

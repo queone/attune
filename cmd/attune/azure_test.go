@@ -365,6 +365,26 @@ func TestGetAppReadsSignInFieldsAndSecretNames(t *testing.T) {
 	}
 }
 
+// TestPutGroupReturnsTheCreatedObjectID — AT7: creating a security group
+// returns the object id Graph gave it, for the applied line.
+func TestPutGroupReturnsTheCreatedObjectID(t *testing.T) {
+	var urls []string
+	var requests []*HTTPRequest
+	transport := &syntheticTransport{urls: &urls, requests: &requests, responses: []*HTTPResponse{
+		{Status: 200, Body: []byte(`{"value":[]}`)},
+		{Status: 201, Body: []byte(`{"id":"group-object"}`)},
+		{Status: 200, Body: []byte(`{"value":[]}`)},
+	}}
+	provider := NewAzureProviderWith(syntheticCli{}, transport, "", "")
+	id, err := provider.PutGroup(SecurityGroup{Name: "eng"})
+	if err != nil || id != "group-object" {
+		t.Fatalf("PutGroup create: id=%q err=%v", id, err)
+	}
+	if requests[1].Method != "POST" || !strings.HasSuffix(requests[1].URL, "/groups") {
+		t.Errorf("second request = %s %s", requests[1].Method, requests[1].URL)
+	}
+}
+
 // TestPutAppSendsSignInPayloadOnCreateAndUpdate — AT4: a create carries the
 // managed fields in its body, an update PATCHes them, and an app with no
 // managed field sends no PATCH.
@@ -397,8 +417,8 @@ func TestPutAppSendsSignInPayloadOnCreateAndUpdate(t *testing.T) {
 		{Status: 200, Body: []byte(`{"value":[]}`)},
 	}}
 	provider := NewAzureProviderWith(syntheticCli{}, transport, "", "")
-	if err := provider.PutApp(app); err != nil {
-		t.Fatalf("PutApp create: %v", err)
+	if id, err := provider.PutApp(app); err != nil || id != "app-client" {
+		t.Fatalf("PutApp create: id=%q err=%v", id, err)
 	}
 	if requests[1].Method != "POST" || !strings.HasSuffix(requests[1].URL, "/applications") {
 		t.Fatalf("second request = %s %s", requests[1].Method, requests[1].URL)
@@ -416,7 +436,7 @@ func TestPutAppSendsSignInPayloadOnCreateAndUpdate(t *testing.T) {
 		{Status: 200, Body: []byte(`{"value":[]}`)},
 	}}
 	provider = NewAzureProviderWith(syntheticCli{}, transport, "", "")
-	if err := provider.PutApp(app); err != nil {
+	if _, err := provider.PutApp(app); err != nil {
 		t.Fatalf("PutApp update: %v", err)
 	}
 	if requests[1].Method != "PATCH" || !strings.HasSuffix(requests[1].URL, "/applications/app-object") {
@@ -430,7 +450,7 @@ func TestPutAppSendsSignInPayloadOnCreateAndUpdate(t *testing.T) {
 		{Status: 200, Body: []byte(`{"value":[]}`)},
 	}}
 	provider = NewAzureProviderWith(syntheticCli{}, transport, "", "")
-	if err := provider.PutApp(AppRegistration{Name: "site"}); err != nil {
+	if _, err := provider.PutApp(AppRegistration{Name: "site"}); err != nil {
 		t.Fatalf("PutApp bare: %v", err)
 	}
 	for _, req := range requests {
@@ -488,7 +508,7 @@ func TestAppSecretsAddAndRemoveThroughGraph(t *testing.T) {
 		{Status: 200, Body: []byte(`{"keyId":"k3","secretText":"fresh-value"}`)},
 	}}
 	provider = NewAzureProviderWith(syntheticCli{}, transport, "", "")
-	if err := provider.PutApp(AppRegistration{Name: "fresh"}); err != nil {
+	if _, err := provider.PutApp(AppRegistration{Name: "fresh"}); err != nil {
 		t.Fatalf("PutApp: %v", err)
 	}
 	if _, _, err := provider.AddAppSecret(AppRegistration{Name: "fresh"}, Secret{Name: "host", ValidForDays: 30}); err != nil {

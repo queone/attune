@@ -2,6 +2,27 @@
 
 > One section per release, newest first: what the release added, changed, removed, or deferred in the product, its design, and its code, and why. Governance, toolchain, and release mechanics stay in `CHANGELOG.md` and git. Settled design is in `arch.md`. Search it to learn why a release changed the product.
 
+## v1.18.0
+
+Added:
+- Apply prints the provider id for each created instance, Elastic IP, IAM role, firewall, health check, app registration, and security group.
+- A created Elastic IP's applied line shows its allocation id, then its public address.
+- `attune edit NAME` reads the new spec from standard input when standard input is not a terminal.
+
+Changed:
+- Five capability `Put` calls return the provider id; `PutAddress` returns the allocation id and the public address.
+- `edit` without a terminal no longer fails with `edit needs a terminal`.
+
+Decisions:
+- Update and delete lines keep their summary, since the operator already knows an existing resource's id.
+- Buckets, budgets, DNS records and zones, resource groups, and role definitions and assignments show no id.
+- An update's `Put` call may return an empty id and makes no extra lookup call.
+- Piped `edit` refuses empty input, so a failed pipe step cannot replace a stored spec with nothing.
+- Piped `edit` refuses invalid input with nothing saved, since no editor is open to fix it.
+
+Risks:
+- No live apply has confirmed a printed id yet; a post-release check on a new instance remains.
+
 ## v1.17.0
 
 Changed:

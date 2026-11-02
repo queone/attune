@@ -726,56 +726,65 @@ func (p *AwsProvider) instanceProfiles(role string) ([]string, error) {
 // PutIamRole creates the role when attune does not own one by that name,
 // then reconciles its managed policies, inline policies, and instance
 // profile.
-func (p *AwsProvider) PutIamRole(role IamRole) error {
+func (p *AwsProvider) PutIamRole(role IamRole) (string, error) {
 	current, exists, err := p.currentIamRole(role.Name)
 	if err != nil {
-		return err
+		return "", err
+	}
+	var created struct {
+		Role struct {
+			Arn string `json:"Arn"`
+		} `json:"Role"`
 	}
 	if !exists {
-		if err := p.run("iam", "create-role", nil, "--role-name", role.Name, "--path", awsIamPath,
+		if err := p.run("iam", "create-role", &created, "--role-name", role.Name, "--path", awsIamPath,
 			"--assume-role-policy-document", awsEC2TrustPolicy, "--tags", awsTagsJSON("")); err != nil {
-			return err
+			return "", err
 		}
 		p.host().roles = append(p.host().roles, role.Name)
 	}
 	for _, arn := range role.ManagedPolicies {
 		if !slices.Contains(current.ManagedPolicies, arn) {
 			if err := p.run("iam", "attach-role-policy", nil, "--role-name", role.Name, "--policy-arn", arn); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
 	for _, arn := range current.ManagedPolicies {
 		if !slices.Contains(role.ManagedPolicies, arn) {
 			if err := p.run("iam", "detach-role-policy", nil, "--role-name", role.Name, "--policy-arn", arn); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
 	for _, name := range sortedAnyKeys(role.InlinePolicies) {
 		if before, ok := current.InlinePolicies[name]; !ok || canonicalJSON(before) != canonicalJSON(role.InlinePolicies[name]) {
 			if err := p.run("iam", "put-role-policy", nil, "--role-name", role.Name, "--policy-name", name, "--policy-document", canonicalJSON(role.InlinePolicies[name])); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
 	for _, name := range sortedAnyKeys(current.InlinePolicies) {
 		if _, ok := role.InlinePolicies[name]; !ok {
 			if err := p.run("iam", "delete-role-policy", nil, "--role-name", role.Name, "--policy-name", name); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
 	switch {
 	case role.InstanceProfile && !current.InstanceProfile:
 		if err := p.run("iam", "create-instance-profile", nil, "--instance-profile-name", role.Name, "--path", awsIamPath, "--tags", awsTagsJSON("")); err != nil {
-			return err
+			return "", err
 		}
-		return p.run("iam", "add-role-to-instance-profile", nil, "--instance-profile-name", role.Name, "--role-name", role.Name)
+		if err := p.run("iam", "add-role-to-instance-profile", nil, "--instance-profile-name", role.Name, "--role-name", role.Name); err != nil {
+			return "", err
+		}
 	case !role.InstanceProfile && current.InstanceProfile:
-		return p.dropInstanceProfiles(role.Name)
+		if err := p.dropInstanceProfiles(role.Name); err != nil {
+			return "", err
+		}
 	}
-	return nil
+	return created.Role.Arn, nil
 }
 
 // currentIamRole returns the live role when attune owns one by that name.
@@ -1152,20 +1161,20 @@ func (p *AwsProvider) permissionsJSON(rules []FirewallRule) string {
 // PutFirewall creates the group when the firewall has no live id, then
 // authorizes the rules the live group lacks and revokes the ones the spec
 // dropped.
-func (p *AwsProvider) PutFirewall(firewall Firewall) error {
+func (p *AwsProvider) PutFirewall(firewall Firewall) (string, error) {
 	h := p.host()
 	var current []FirewallRule
 	if firewall.ID == "" {
 		vpc, err := p.vpcID(firewall.VPC)
 		if err != nil {
-			return err
+			return "", err
 		}
 		var created struct {
 			GroupID string `json:"GroupId"`
 		}
 		if err := p.run("ec2", "create-security-group", &created, "--group-name", firewall.Name, "--description", "managed by attune",
 			"--vpc-id", vpc, "--tag-specifications", awsTagSpec("security-group", firewall.Name, nil)); err != nil {
-			return err
+			return "", err
 		}
 		firewall.ID = created.GroupID
 		h.firewallIDs[firewall.Name] = created.GroupID
@@ -1175,7 +1184,7 @@ func (p *AwsProvider) PutFirewall(firewall Firewall) error {
 			SecurityGroups []awsSecurityGroup `json:"SecurityGroups"`
 		}
 		if err := p.run("ec2", "describe-security-groups", &result, "--group-ids", firewall.ID); err != nil {
-			return err
+			return "", err
 		}
 		if len(result.SecurityGroups) == 1 {
 			current = p.rulesFrom(result.SecurityGroups[0])
@@ -1184,13 +1193,15 @@ func (p *AwsProvider) PutFirewall(firewall Firewall) error {
 	add, remove := atomicRuleDiff(current, firewall.Rules)
 	if len(remove) > 0 {
 		if err := p.run("ec2", "revoke-security-group-ingress", nil, "--group-id", firewall.ID, "--ip-permissions", p.permissionsJSON(remove)); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if len(add) > 0 {
-		return p.run("ec2", "authorize-security-group-ingress", nil, "--group-id", firewall.ID, "--ip-permissions", p.permissionsJSON(add))
+		if err := p.run("ec2", "authorize-security-group-ingress", nil, "--group-id", firewall.ID, "--ip-permissions", p.permissionsJSON(add)); err != nil {
+			return "", err
+		}
 	}
-	return nil
+	return firewall.ID, nil
 }
 
 // atomicRuleDiff expands both rule sets to one source per rule and returns
@@ -1639,40 +1650,40 @@ func (p *AwsProvider) ListAddresses() ([]StaticAddress, error) {
 // PutAddress allocates the address when it has no live id, then attaches it
 // to its instance, moving it when it is attached elsewhere. It returns the
 // public address.
-func (p *AwsProvider) PutAddress(address StaticAddress) (string, error) {
+func (p *AwsProvider) PutAddress(address StaticAddress) (id, ip string, err error) {
 	instanceID, err := p.instanceID(address.Instance)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := p.waitForRunning(instanceID); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if address.ID == "" {
 		var allocated awsAddress
 		if err := p.run("ec2", "allocate-address", &allocated, "--domain", "vpc", "--tag-specifications", awsTagSpec("elastic-ip", address.Name, nil)); err != nil {
-			return "", err
+			return "", "", err
 		}
 		if err := p.run("ec2", "associate-address", nil, "--allocation-id", allocated.AllocationID, "--instance-id", instanceID); err != nil {
-			return "", err
+			return "", "", err
 		}
-		return allocated.PublicIP, nil
+		return allocated.AllocationID, allocated.PublicIP, nil
 	}
 	live, err := p.describeAddresses([]string{address.ID})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if len(live) != 1 {
-		return "", fmt.Errorf("address %s not found", address.ID)
+		return "", "", fmt.Errorf("address %s not found", address.ID)
 	}
 	if live[0].AssociationID != "" {
 		if err := p.run("ec2", "disassociate-address", nil, "--association-id", live[0].AssociationID); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 	if err := p.run("ec2", "associate-address", nil, "--allocation-id", address.ID, "--instance-id", instanceID); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return live[0].PublicIP, nil
+	return address.ID, live[0].PublicIP, nil
 }
 
 // DeleteAddress detaches the address when attached, then releases it.
@@ -2037,12 +2048,12 @@ func healthCheckConfigJSON(check HealthCheck) string {
 // subscriptions, and the alarm live in us-east-1 beside the check's metric.
 // The topic comes first so that a region guardrail denying SNS stops the
 // apply before anything exists.
-func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
+func (p *AwsProvider) PutHealthCheck(check HealthCheck) (string, error) {
 	var topic struct {
 		ARN string `json:"TopicArn"`
 	}
 	if err := p.runIn(awsAlarmRegion, "sns", "create-topic", &topic, "--name", awsTopicName(check.Name), "--tags", awsTagsJSON("")); err != nil {
-		return err
+		return "", err
 	}
 	if p.host().topics == nil {
 		p.host().topics = map[string]string{}
@@ -2056,7 +2067,7 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 		} `json:"Subscriptions"`
 	}
 	if err := p.runIn(awsAlarmRegion, "sns", "list-subscriptions-by-topic", &subs, "--topic-arn", topic.ARN); err != nil {
-		return err
+		return "", err
 	}
 	present := map[string]string{}
 	for _, s := range subs.Subscriptions {
@@ -2067,7 +2078,7 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 	for _, email := range normalized(check.Emails) {
 		if _, ok := present[email]; !ok {
 			if err := p.runIn(awsAlarmRegion, "sns", "subscribe", nil, "--topic-arn", topic.ARN, "--protocol", "email", "--notification-endpoint", email); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
@@ -2075,7 +2086,7 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 		arn := present[email]
 		if !slices.Contains(check.Emails, email) && strings.HasPrefix(arn, "arn:") {
 			if err := p.runIn(awsAlarmRegion, "sns", "unsubscribe", nil, "--subscription-arn", arn); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
@@ -2086,11 +2097,11 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 			} `json:"HealthCheck"`
 		}
 		if err := p.run("route53", "create-health-check", &created, "--caller-reference", p.reference(), "--health-check-config", healthCheckConfigJSON(check)); err != nil {
-			return err
+			return "", err
 		}
 		check.ID = created.HealthCheck.ID
 		if err := p.run("route53", "change-tags-for-resource", nil, "--resource-type", "healthcheck", "--resource-id", check.ID, "--add-tags", awsTagsJSON(check.Name)); err != nil {
-			return err
+			return "", err
 		}
 	} else {
 		args := []string{"--health-check-id", check.ID, "--port", strconv.FormatInt(check.Port, 10), "--failure-threshold", strconv.FormatInt(check.FailureThreshold, 10)}
@@ -2106,15 +2117,19 @@ func (p *AwsProvider) PutHealthCheck(check HealthCheck) error {
 			args = append(args, "--resource-path", check.Path)
 		}
 		if err := p.run("route53", "update-health-check", nil, args...); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return p.runIn(awsAlarmRegion, "cloudwatch", "put-metric-alarm", nil,
+	err := p.runIn(awsAlarmRegion, "cloudwatch", "put-metric-alarm", nil,
 		"--alarm-name", awsTopicName(check.Name), "--namespace", "AWS/Route53", "--metric-name", "HealthCheckStatus",
 		"--dimensions", `[{"Name":"HealthCheckId","Value":"`+check.ID+`"}]`,
 		"--statistic", "Minimum", "--period", "60", "--evaluation-periods", "1", "--threshold", "1",
 		"--comparison-operator", "LessThanThreshold", "--treat-missing-data", "breaching",
 		"--alarm-actions", topic.ARN, "--ok-actions", topic.ARN, "--tags", awsTagsJSON(""))
+	if err != nil {
+		return "", err
+	}
+	return check.ID, nil
 }
 
 // DeleteHealthCheck removes the alarm, the topic, and the check.

@@ -74,10 +74,14 @@ The provider reconciles a host through five provider-neutral kinds:
   merge semantics. `metadataHopLimit` is unmanaged when unset, so the image's default stays; `1` keeps containers on a
   Docker bridge network from reaching the metadata service and the instance role's credentials. The hop limit bounds only
   IMDSv2 token responses, so it protects only with `imdsv2Required` on. A change applies in place, without a restart.
-- `staticAddress`: attached to an `instance` by name. The applied line for a new `staticAddress` shows the public address.
+- `staticAddress`: attached to an `instance` by name. The applied line for a new `staticAddress` shows its allocation id
+  and public address, as `eipalloc-... address 203.0.113.10`.
 
 Plan and apply run them in dependency order, `iamRole`, `bucket`, `firewall`, `instance`, `staticAddress`, then DNS, and
 prune them in reverse. Host pruning is off by default; `prune.hosts: true` or `-H/--prune-hosts` turns it on.
+
+The applied line for a new `iamRole` shows its role ARN, for a new `firewall` its security group id, for a new `instance`
+its instance id, and for a new `healthCheck` its Route 53 health check id.
 
 A launch that fails right after its instance profile was created is retried for about thirty seconds, since IAM takes a few
 seconds to make a new profile visible, and an address waits up to a minute for its instance to leave `pending`, since it

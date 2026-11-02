@@ -75,8 +75,10 @@ The change block a live run prints is prospective: change lines and the `N chang
 yellow, under an uncolored `attune plan: provider=<name>` header, for both `plan` and `apply`. `apply` then prints a green
 confirmation block headed `attune apply: provider=<name>` — one green past-tense line (`created`/`updated`/`deleted`) per
 change, printed as that change lands, so an interrupted run shows exactly what was applied — followed by a green
-`N change(s) made.` trailer on full success. Color is suppressed automatically for non-TTY output, `NO_COLOR`, and
-`TERM=dumb`.
+`N change(s) made.` trailer on full success. A created resource whose provider id an operator needs next shows that id in
+place of the `missing` summary, as in `+ created instance instance|mud-vm01 i-070008fedec8f45cd`; the provider pages list
+which kinds do. Update and delete lines keep their summary. Color is suppressed automatically for non-TTY output,
+`NO_COLOR`, and `TERM=dumb`.
 
 DNS zone creation is part of the plan: a spec referencing a zone that does not exist plans as `+ create dnsZone|<zone>` ahead
 of that zone's record changes, and `apply` creates it through the same reviewed change loop. Existing zones are never

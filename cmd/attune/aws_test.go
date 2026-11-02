@@ -445,8 +445,16 @@ func TestAwsCreatesHostInDependencyOrder(t *testing.T) {
 			t.Errorf("run-instances argv lacks %q: %v", want, run)
 		}
 	}
-	if !slices.Contains(applied, "staticAddress|example-host address 203.0.113.10") {
-		t.Errorf("applied lines = %v, want the address shown", applied)
+	// AT6: each created line shows the id the create call returned.
+	for _, want := range []string{
+		"iamRole|example-host arn:aws:iam::111111111111:role/attune/example-host",
+		"firewall|example-host sg-0new",
+		"instance|example-host i-0new",
+		"staticAddress|example-host eipalloc-0new address 203.0.113.10",
+	} {
+		if !slices.Contains(applied, want) {
+			t.Errorf("applied lines = %v, want %q", applied, want)
+		}
 	}
 }
 
@@ -1234,9 +1242,9 @@ func TestAwsAddressWaitsForTheInstanceToRun(t *testing.T) {
 	var sleeps []time.Duration
 	provider.sleep = func(d time.Duration) { sleeps = append(sleeps, d) }
 	provider.host().instanceIDs["example-host"] = "i-0new"
-	ip, err := provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"})
-	if err != nil || ip != "203.0.113.10" || len(sleeps) != 2 {
-		t.Fatalf("ip=%q err=%v sleeps=%v", ip, err, sleeps)
+	id, ip, err := provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"})
+	if err != nil || id != "eipalloc-0new" || ip != "203.0.113.10" || len(sleeps) != 2 {
+		t.Fatalf("id=%q ip=%q err=%v sleeps=%v", id, ip, err, sleeps)
 	}
 	pairs := cli.pairs()
 	lastPoll := -1
@@ -1253,7 +1261,7 @@ func TestAwsAddressWaitsForTheInstanceToRun(t *testing.T) {
 	sleeps = nil
 	provider.sleep = func(d time.Duration) { sleeps = append(sleeps, d) }
 	provider.host().instanceIDs["example-host"] = "i-0new"
-	_, err = provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"})
+	_, _, err = provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"})
 	var total time.Duration
 	for _, d := range sleeps {
 		total += d
@@ -1265,7 +1273,7 @@ func TestAwsAddressWaitsForTheInstanceToRun(t *testing.T) {
 	provider, _ = newAwsFake(map[string][]fakeAwsResult{"ec2 describe-instances": {{out: stateJSON("terminated")}}})
 	provider.sleep = func(time.Duration) {}
 	provider.host().instanceIDs["example-host"] = "i-0new"
-	if _, err := provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"}); err == nil || !strings.Contains(err.Error(), "is terminated, not running") {
+	if _, _, err := provider.PutAddress(StaticAddress{Name: "example-host", Instance: "example-host"}); err == nil || !strings.Contains(err.Error(), "is terminated, not running") {
 		t.Errorf("terminated instance: %v", err)
 	}
 }
@@ -1334,10 +1342,12 @@ func newAlertChainCheck() HealthCheck {
 
 // TestAwsHealthCheckCreatesTopicBeforeCheck — AT1: a new check's topic and
 // subscriptions come before the Route 53 check, and the alarm comes last.
+// The call returns the new check's id for the applied line.
 func TestAwsHealthCheckCreatesTopicBeforeCheck(t *testing.T) {
 	provider, cli := newAwsFake(awsAlertChainAccount(nil))
-	if err := provider.PutHealthCheck(newAlertChainCheck()); err != nil {
-		t.Fatalf("PutHealthCheck: %v", err)
+	id, err := provider.PutHealthCheck(newAlertChainCheck())
+	if err != nil || id != "hc-new" {
+		t.Fatalf("PutHealthCheck: id=%q err=%v", id, err)
 	}
 	want := []string{"sns create-topic", "sns list-subscriptions-by-topic", "sns subscribe",
 		"route53 create-health-check", "route53 change-tags-for-resource", "cloudwatch put-metric-alarm"}
@@ -1351,7 +1361,7 @@ func TestAwsHealthCheckCreatesTopicBeforeCheck(t *testing.T) {
 // check the next plan completes, and both errors name the guardrail fix.
 func TestAwsHealthCheckDenialNamesTheGuardrailFix(t *testing.T) {
 	provider, cli := newAwsFake(awsAlertChainAccount(map[string][]fakeAwsResult{"sns create-topic": {{exit: 254}}}))
-	err := provider.PutHealthCheck(newAlertChainCheck())
+	_, err := provider.PutHealthCheck(newAlertChainCheck())
 	for _, want := range []string{"sns create-topic", "AWS rejected the request", "UsEast1Partitional"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("denied topic: err=%v, want %q", err, want)
@@ -1362,7 +1372,7 @@ func TestAwsHealthCheckDenialNamesTheGuardrailFix(t *testing.T) {
 	}
 
 	provider, _ = newAwsFake(awsAlertChainAccount(map[string][]fakeAwsResult{"cloudwatch put-metric-alarm": {{exit: 254}}}))
-	err = provider.PutHealthCheck(newAlertChainCheck())
+	_, err = provider.PutHealthCheck(newAlertChainCheck())
 	for _, want := range []string{"cloudwatch put-metric-alarm", "UsEast1Partitional"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("denied alarm: err=%v, want %q", err, want)

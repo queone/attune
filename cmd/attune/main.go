@@ -22,7 +22,7 @@ import (
 
 const (
 	programName    = "attune"
-	programVersion = "1.17.0"
+	programVersion = "1.18.0"
 	modulePath     = "github.com/queone/attune"
 	installPath    = modulePath + "/cmd/attune"
 )
@@ -665,7 +665,7 @@ func helpDoc() help.Doc {
 				{Form: "init [-N] [-t PATH]", Meaning: "unlock an existing store, or create one with -N"},
 				{Form: "st", Meaning: "status of the store, key, entries, and last save"},
 				{Form: "add DIR | NAME [FILE]", Meaning: "import a directory of specs, or store one from a file or stdin"},
-				{Form: "edit NAME", Meaning: "change a stored spec in $EDITOR and save a validated version"},
+				{Form: "edit NAME", Meaning: "change a stored spec in $EDITOR or from stdin and save a validated version"},
 				{Form: "rename OLD NEW", Meaning: "change an entry's name, keeping its versions"},
 				{Form: "rm NAME", Meaning: "forget an entry and its stored versions"},
 				{Form: "ls [-b FIELD]", Meaning: "list entries by name, or by captured"},

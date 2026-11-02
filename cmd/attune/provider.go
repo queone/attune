@@ -18,15 +18,16 @@ type DNSProvider interface {
 }
 
 // IdentityProvider is the capability a provider offers for securityGroup
-// and appRegistration specs.
+// and appRegistration specs. PutGroup returns the group's object id and
+// PutApp the application's client id, for the applied line of a create.
 type IdentityProvider interface {
 	GetGroup(name string) (*SecurityGroup, error)
 	ListGroupNames() ([]string, error)
-	PutGroup(group SecurityGroup) error
+	PutGroup(group SecurityGroup) (string, error)
 	DeleteGroup(name string) error
 	GetApp(tenant, name string) (*AppRegistration, error)
 	ListAppNames(tenant string) ([]string, error)
-	PutApp(app AppRegistration) error
+	PutApp(app AppRegistration) (string, error)
 	DeleteApp(tenant, name string) error
 	AddAppSecret(app AppRegistration, secret Secret) (keyID, value string, err error)
 	RemoveAppSecret(app AppRegistration, keyID string) error
@@ -54,10 +55,11 @@ type ResourceGroupProvider interface {
 }
 
 // IamRoleProvider is the capability a provider offers for iamRole specs.
-// Live roles are the ones the provider itself created.
+// Live roles are the ones the provider itself created. PutIamRole returns
+// the ARN of a role it created, empty on an update, for the applied line.
 type IamRoleProvider interface {
 	ListIamRoles() ([]IamRole, error)
-	PutIamRole(role IamRole) error
+	PutIamRole(role IamRole) (string, error)
 	DeleteIamRole(role IamRole) error
 }
 
@@ -70,10 +72,11 @@ type StorageProvider interface {
 }
 
 // NetworkProvider is the capability a provider offers for firewall specs.
-// Live firewalls are the ones the provider itself created.
+// Live firewalls are the ones the provider itself created. PutFirewall
+// returns the firewall's id, for the applied line of a create.
 type NetworkProvider interface {
 	ListFirewalls() ([]Firewall, error)
-	PutFirewall(firewall Firewall) error
+	PutFirewall(firewall Firewall) (string, error)
 	DeleteFirewall(firewall Firewall) error
 }
 
@@ -82,26 +85,28 @@ type NetworkProvider interface {
 // provider itself created. ResolveImage turns a parameter path into an
 // image id and returns an image id unchanged. PutInstance returns the id of
 // an instance it launched, empty on an update; PutAddress returns the
-// public address. Both feed references and the applied line.
+// address's allocation id and its public address. Both feed references and
+// the applied line.
 type ComputeProvider interface {
 	ResolveImage(image string) (string, error)
 	ListInstances() ([]Instance, error)
 	PutInstance(instance Instance) (string, error)
 	DeleteInstance(instance Instance) error
 	ListAddresses() ([]StaticAddress, error)
-	PutAddress(address StaticAddress) (string, error)
+	PutAddress(address StaticAddress) (id, ip string, err error)
 	DeleteAddress(address StaticAddress) error
 }
 
 // MonitoringProvider is the capability a provider offers for budget and
 // healthCheck specs. Live budgets and checks are the ones the provider
-// itself created.
+// itself created. PutHealthCheck returns the check's id, for the applied
+// line of a create.
 type MonitoringProvider interface {
 	ListBudgets() ([]Budget, error)
 	PutBudget(budget Budget) error
 	DeleteBudget(budget Budget) error
 	ListHealthChecks() ([]HealthCheck, error)
-	PutHealthCheck(check HealthCheck) error
+	PutHealthCheck(check HealthCheck) (string, error)
 	DeleteHealthCheck(check HealthCheck) error
 }
 

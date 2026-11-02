@@ -96,15 +96,57 @@ func TestEditReopensOnInvalidAndAbortsOnUnchanged(t *testing.T) {
 		t.Fatalf("second valid edit %q", out)
 	}
 
-	h.app.isTerminal = func() bool { return false }
-	if _, errs := h.mustFail(1, "edit", "dns.yaml"); !strings.Contains(errs, "needs a terminal") {
-		t.Fatalf("edit without a terminal %q", errs)
-	}
-	h.app.isTerminal = func() bool { return true }
 	if _, errs := h.mustFail(1, "edit", "nope.yaml"); !strings.Contains(errs, "not registered") {
 		t.Fatalf("edit unknown %q", errs)
 	}
 	if _, errs := h.mustFail(2, "edit"); !strings.Contains(errs, "usage") {
 		t.Fatalf("edit without a name %q", errs)
+	}
+}
+
+// TestEditReadsPipedStdin — with standard input not a terminal, edit saves
+// the piped content as a validated new version without an editor, reports
+// identical content as unchanged, and refuses empty or invalid input with
+// nothing saved.
+func TestEditReadsPipedStdin(t *testing.T) {
+	h := newHarness(t)
+	h.initAndAdd()
+	h.app.editor = func(string) error {
+		t.Fatal("piped edit opened the editor")
+		return nil
+	}
+	h.app.isTerminal = func() bool { return false }
+	stored := h.mustRun("cat", "app.yaml")
+	pipe := func(content string) { h.app.stdin = strings.NewReader(content) }
+
+	pipe(stored + "# piped\n")
+	if out := h.mustRun("edit", "app.yaml"); out != line("updated", "app.yaml") {
+		t.Fatalf("piped edit output %q", out)
+	}
+	if rec := h.lastSave(); rec.Action != "edit app.yaml" {
+		t.Fatalf("record after piped edit: %+v", rec)
+	}
+	if got := h.mustRun("cat", "app.yaml"); got != stored+"# piped\n" {
+		t.Fatalf("cat after piped edit %q", got)
+	}
+
+	pipe(stored + "# piped\n")
+	if out := h.mustRun("edit", "app.yaml"); out != line("unchanged", "app.yaml") {
+		t.Fatalf("identical piped edit %q", out)
+	}
+
+	for name, content := range map[string]string{"empty": "", "blank": " \n\n"} {
+		pipe(content)
+		if _, errs := h.mustFail(1, "edit", "app.yaml"); !strings.Contains(errs, "standard input is empty; nothing saved") {
+			t.Fatalf("%s piped edit %q", name, errs)
+		}
+	}
+
+	pipe("kind: [unterminated\n")
+	if _, errs := h.mustFail(1, "edit", "app.yaml"); !strings.Contains(errs, "parse app.yaml") || !strings.Contains(errs, "nothing saved") {
+		t.Fatalf("invalid piped edit %q", errs)
+	}
+	if got := h.mustRun("cat", "app.yaml"); got != stored+"# piped\n" {
+		t.Fatal("refused piped edit changed the stored content")
 	}
 }

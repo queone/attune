@@ -25,20 +25,23 @@ and `version` needs macOS, because the key lives in the login keychain.
 The examples keep the store in `~/Sync`, standing for any folder your Macs sync, such as one in iCloud Drive.
 
 ```text
-attune init -N -t ~/Sync/attune.store             # first Mac: create the store and its key, remember the path
-attune add attune.yaml ./attune.yaml              # store the configuration under its name
-attune add ./specs                                # import every spec under a directory, named relative to it
-attune add res/dns/new.yaml < new.yaml            # store one new spec from standard input
-attune edit res/dns/new.yaml                      # change a stored spec in $EDITOR; saved only if it validates
-attune ls                                         # entries by name; -b captured for newest first
-attune cat attune.yaml                            # one stored file on stdout
-attune rename dns/old.yaml dns/new.yaml           # change a name, keeping the versions
-attune render                                     # browse a plaintext copy in a private temp directory
-attune st                                         # store, key, entries, last save; drift is plan's job
-attune init -t ~/Sync/attune.store                # another Mac: unlock with the passphrase, remember the path
+attune init -N -t ~/Sync/attune.store                    # first Mac: create the store and its key, remember the path
+attune add attune.yaml ./attune.yaml                     # store the configuration under its name
+attune add ./specs                                       # import every spec under a directory, named relative to it
+attune add res/dns/new.yaml < new.yaml                   # store one new spec from standard input
+attune edit res/dns/new.yaml                             # change a stored spec in $EDITOR; saved only if it validates
+attune cat app.yaml | sd 600 300 | attune edit app.yaml  # change a stored spec from standard input
+attune ls                                                # entries by name; -b captured for newest first
+attune cat attune.yaml                                   # one stored file on stdout
+attune rename dns/old.yaml dns/new.yaml                  # change a name, keeping the versions
+attune render                                            # browse a plaintext copy in a private temp directory
+attune st                                                # store, key, entries, last save; drift is plan's job
+attune init -t ~/Sync/attune.store                       # another Mac: unlock with the passphrase, remember the path
 ```
 
-`edit` reopens the editor when the result would not validate; quit without changing anything to abort. Drift against the
+`edit` reopens the editor when the result would not validate; quit without changing anything to abort. When standard
+input is not a terminal, `edit` reads the new spec from it instead, so `attune cat NAME | sd ... | attune edit NAME` works:
+it saves a version only when the input validates, and refuses empty or invalid input with nothing saved. Drift against the
 provider is what `plan` reports, so `st` never contacts a provider.
 
 `st` starts with the time of the check (`checked`), so pasted output shows when it was taken, and ends with

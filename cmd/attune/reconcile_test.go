@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/queone/gkit/color"
 )
 
 // fakeProvider is a hand-rolled Provider double for Plan/Apply tests,
@@ -27,6 +29,8 @@ type fakeProvider struct {
 	secretsRemoved  []string
 	roleDefinitions []RoleDefinition
 	resourceGroups  []ResourceGroup
+	// newID is the provider id each id-returning Put call reports.
+	newID string
 }
 
 var (
@@ -80,13 +84,13 @@ func (p *fakeProvider) PutDNS(r DnsRecord) error {
 	p.putDNS = append(p.putDNS, r)
 	return nil
 }
-func (p *fakeProvider) DeleteDNS(DnsRecord) error             { return nil }
-func (p *fakeProvider) ListGroupNames() ([]string, error)     { return p.groupNames, nil }
-func (p *fakeProvider) PutGroup(SecurityGroup) error          { return nil }
-func (p *fakeProvider) DeleteGroup(string) error              { return nil }
-func (p *fakeProvider) ListAppNames(string) ([]string, error) { return p.appNames, nil }
-func (p *fakeProvider) PutApp(AppRegistration) error          { return nil }
-func (p *fakeProvider) DeleteApp(string, string) error        { return nil }
+func (p *fakeProvider) DeleteDNS(DnsRecord) error              { return nil }
+func (p *fakeProvider) ListGroupNames() ([]string, error)      { return p.groupNames, nil }
+func (p *fakeProvider) PutGroup(SecurityGroup) (string, error) { return p.newID, nil }
+func (p *fakeProvider) DeleteGroup(string) error               { return nil }
+func (p *fakeProvider) ListAppNames(string) ([]string, error)  { return p.appNames, nil }
+func (p *fakeProvider) PutApp(AppRegistration) (string, error) { return p.newID, nil }
+func (p *fakeProvider) DeleteApp(string, string) error         { return nil }
 func (p *fakeProvider) AddAppSecret(app AppRegistration, secret Secret) (string, string, error) {
 	p.secretsAdded = append(p.secretsAdded, app.Key()+" "+secret.Name)
 	return "k-new-" + secret.Name, "synthetic-secret-value", nil
@@ -345,8 +349,8 @@ func TestResourceGroupUpdatesMergeDeclaredTagsOnlyWhenNeeded(t *testing.T) {
 // Apply failure.
 type applyFailProvider struct{ fakeProvider }
 
-func (p *applyFailProvider) PutGroup(SecurityGroup) error {
-	return errors.New("synthetic group failure")
+func (p *applyFailProvider) PutGroup(SecurityGroup) (string, error) {
+	return "", errors.New("synthetic group failure")
 }
 
 func TestApplyReportsEachSuccessfulChangeInOrder(t *testing.T) {
@@ -871,20 +875,126 @@ func TestDeliveredSecretAppliesAndRollsBack(t *testing.T) {
 }
 
 // fakeHost is a provider holding static addresses, counting how often its
-// addresses are listed and giving each new address newIP.
+// addresses are listed and giving each new address newAllocation and newIP.
+// Its IAM role, firewall, and health check calls report fakeProvider.newID.
 type fakeHost struct {
 	fakeProvider
-	addresses    []StaticAddress
-	addressLists int
-	newIP        string
+	addresses     []StaticAddress
+	addressLists  int
+	newAllocation string
+	newIP         string
 }
 
 func (h *fakeHost) ResolveImage(image string) (string, error) { return image, nil }
 func (h *fakeHost) ListInstances() ([]Instance, error)        { return nil, nil }
 func (h *fakeHost) PutInstance(Instance) (string, error)      { return "i-0new", nil }
 func (h *fakeHost) DeleteInstance(Instance) error             { return nil }
-func (h *fakeHost) PutAddress(StaticAddress) (string, error)  { return h.newIP, nil }
-func (h *fakeHost) DeleteAddress(StaticAddress) error         { return nil }
+func (h *fakeHost) PutAddress(StaticAddress) (string, string, error) {
+	return h.newAllocation, h.newIP, nil
+}
+func (h *fakeHost) ListIamRoles() ([]IamRole, error)           { return nil, nil }
+func (h *fakeHost) PutIamRole(IamRole) (string, error)         { return h.newID, nil }
+func (h *fakeHost) DeleteIamRole(IamRole) error                { return nil }
+func (h *fakeHost) ListFirewalls() ([]Firewall, error)         { return nil, nil }
+func (h *fakeHost) PutFirewall(Firewall) (string, error)       { return h.newID, nil }
+func (h *fakeHost) DeleteFirewall(Firewall) error              { return nil }
+func (h *fakeHost) ListBudgets() ([]Budget, error)             { return nil, nil }
+func (h *fakeHost) PutBudget(Budget) error                     { return nil }
+func (h *fakeHost) DeleteBudget(Budget) error                  { return nil }
+func (h *fakeHost) ListHealthChecks() ([]HealthCheck, error)   { return nil, nil }
+func (h *fakeHost) PutHealthCheck(HealthCheck) (string, error) { return h.newID, nil }
+func (h *fakeHost) DeleteHealthCheck(HealthCheck) error        { return nil }
+
+var (
+	_ ComputeProvider    = (*fakeHost)(nil)
+	_ IamRoleProvider    = (*fakeHost)(nil)
+	_ NetworkProvider    = (*fakeHost)(nil)
+	_ MonitoringProvider = (*fakeHost)(nil)
+)
+
+// appliedSummaries applies changes against provider and returns each
+// reported change's summary in order.
+func appliedSummaries(t *testing.T, provider LiveProvider, changes []Change) []string {
+	t.Helper()
+	var summaries []string
+	if err := Apply(provider, changes, &Options{}, func(c Change) { summaries = append(summaries, c.Summary) }); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	return summaries
+}
+
+// TestCreatedLinesShowTheProviderID — AT1, AT3, AT4: a create change of
+// each kind with a provider id reports that id as its summary, and the
+// applied line renders it after the key.
+func TestCreatedLinesShowTheProviderID(t *testing.T) {
+	host := &fakeHost{newID: "id-new"}
+	changes := []Change{
+		{Kind: "iamRole", Action: ActionCreate, Key: "iamRole|web", Summary: "missing", Target: Target{Kind: TargetIamRole, IamRole: IamRole{Name: "web"}}},
+		{Kind: "firewall", Action: ActionCreate, Key: "firewall|web", Summary: "missing", Target: Target{Kind: TargetFirewall, Firewall: Firewall{Name: "web"}}},
+		{Kind: "instance", Action: ActionCreate, Key: "instance|mud-vm01", Summary: "missing", Target: Target{Kind: TargetInstance, Instance: Instance{Name: "mud-vm01"}}},
+		{Kind: "healthCheck", Action: ActionCreate, Key: "healthCheck|web", Summary: "missing", Target: Target{Kind: TargetHealthCheck, HealthCheck: HealthCheck{Name: "web", Target: "192.0.2.1"}}},
+		{Kind: "securityGroup", Action: ActionCreate, Key: "securityGroup|eng", Summary: "missing", Target: Target{Kind: TargetGroup, Group: SecurityGroup{Name: "eng"}}},
+		{Kind: "appRegistration", Action: ActionCreate, Key: "appRegistration|site", Summary: "missing", Target: Target{Kind: TargetApp, App: AppRegistration{Name: "site"}}},
+	}
+	want := []string{"id-new", "id-new", "i-0new", "id-new", "id-new", "id-new"}
+	if got := appliedSummaries(t, host, changes); !slices.Equal(got, want) {
+		t.Errorf("summaries = %v, want %v", got, want)
+	}
+	reported := changes[2]
+	reported.Summary = "i-070008fedec8f45cd"
+	fields := strings.Fields(color.ClearCode(renderAppliedLine(reported)))
+	if wantLine := []string{"+", "created", "instance", "instance|mud-vm01", "i-070008fedec8f45cd"}; !slices.Equal(fields, wantLine) {
+		t.Errorf("applied line fields = %v, want %v", fields, wantLine)
+	}
+}
+
+// TestCreatedAddressShowsAllocationAndAddress — AT2: a created address
+// reports its allocation id before its public address, and a re-attached
+// one reports the address alone.
+func TestCreatedAddressShowsAllocationAndAddress(t *testing.T) {
+	host := &fakeHost{newAllocation: "eipalloc-0new", newIP: "203.0.113.10"}
+	changes := []Change{
+		{Kind: "staticAddress", Action: ActionCreate, Key: "staticAddress|web", Summary: "missing", Target: Target{Kind: TargetAddress, Address: StaticAddress{Name: "web", Instance: "web"}}},
+		{Kind: "staticAddress", Action: ActionUpdate, Key: "staticAddress|db", Summary: "attached instance differs", Target: Target{Kind: TargetAddress, Address: StaticAddress{ID: "eipalloc-0db", Name: "db", Instance: "db"}}},
+	}
+	want := []string{"eipalloc-0new address 203.0.113.10", "address 203.0.113.10"}
+	if got := appliedSummaries(t, host, changes); !slices.Equal(got, want) {
+		t.Errorf("summaries = %v, want %v", got, want)
+	}
+	noIP := &fakeHost{newAllocation: "eipalloc-0new"}
+	if got := appliedSummaries(t, noIP, changes[:1]); !slices.Equal(got, []string{"eipalloc-0new"}) {
+		t.Errorf("summary without an address = %v, want the allocation id alone", got)
+	}
+}
+
+// TestUpdatesAndEmptyIDsKeepTheirSummary — AT5: an update keeps its planned
+// summary even when the call reports an id, and a create whose call
+// reports no id keeps "missing".
+func TestUpdatesAndEmptyIDsKeepTheirSummary(t *testing.T) {
+	targets := []Target{
+		{Kind: TargetIamRole, IamRole: IamRole{Name: "web"}},
+		{Kind: TargetFirewall, Firewall: Firewall{Name: "web"}},
+		{Kind: TargetHealthCheck, HealthCheck: HealthCheck{Name: "web", Target: "192.0.2.1"}},
+		{Kind: TargetGroup, Group: SecurityGroup{Name: "eng"}},
+		{Kind: TargetApp, App: AppRegistration{Name: "site"}},
+	}
+	var updates, creates []Change
+	for _, target := range targets {
+		updates = append(updates, Change{Kind: "kind", Action: ActionUpdate, Key: "k", Summary: "rules differ", Target: target})
+		creates = append(creates, Change{Kind: "kind", Action: ActionCreate, Key: "k", Summary: "missing", Target: target})
+	}
+	for _, s := range appliedSummaries(t, &fakeHost{newID: "id-live"}, updates) {
+		if s != "rules differ" {
+			t.Errorf("update summary = %q, want %q", s, "rules differ")
+		}
+	}
+	for _, s := range appliedSummaries(t, &fakeHost{}, creates) {
+		if s != "missing" {
+			t.Errorf("create summary = %q, want %q", s, "missing")
+		}
+	}
+}
+func (h *fakeHost) DeleteAddress(StaticAddress) error { return nil }
 func (h *fakeHost) ListAddresses() ([]StaticAddress, error) {
 	h.addressLists++
 	return h.addresses, nil

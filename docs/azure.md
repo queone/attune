@@ -65,6 +65,8 @@ tenant: 11111111-1111-1111-1111-111111111111
   `apply` adds a new credential and removes the old one. To rotate a secret that may have leaked, set `issuedAfter` to now
   and apply. When `secrets` is set, a live secret it does not name is deleted under identity pruning; when it is omitted,
   live secrets are untouched. `validForDays` applies when a secret is created or rotated and is never a drift source.
+- The applied line for a new `appRegistration` shows its application (client) id, and for a new `securityGroup` its object
+  id.
 - `apply` prints a new or rotated secret's value once, on its green applied line as `value <secret> (shown once)`. `plan`
   never shows a value, and `-V` shows only the live credential's dates. attune stores nothing; copy the value where the
   application reads it, or name a delivery target so it never reaches the screen.

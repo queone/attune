@@ -672,6 +672,18 @@ func dnsProtected(item DnsRecord) bool {
 	return t == "SOA" || t == "NS"
 }
 
+// showID returns a function that takes a Put call's id and error and,
+// when c creates a resource and the call returned an id, makes that id the
+// change's summary. It returns the error unchanged.
+func showID(c *Change) func(id string, err error) error {
+	return func(id string, err error) error {
+		if err == nil && id != "" && c.Action == ActionCreate {
+			c.Summary = id
+		}
+		return err
+	}
+}
+
 // Apply performs every planned Change against provider, in order,
 // invoking report after each successful mutation when report is non-nil.
 // It records each applied address and instance in options.Outputs and
@@ -696,8 +708,9 @@ func Apply(provider LiveProvider, changes []Change, options *Options, report fun
 }
 
 // applyChange performs one Change through the capability its target needs.
-// It may amend the change's summary with a result worth showing, such as
-// the public address a staticAddress received.
+// It may amend the change's summary with a result worth showing: a create
+// shows the provider id the resource received, and a staticAddress shows
+// its public address.
 func applyChange(provider LiveProvider, c *Change, options *Options) error {
 	subscription := options.Subscription
 	outputs := options.outputs()
@@ -713,7 +726,7 @@ func applyChange(provider LiveProvider, c *Change, options *Options) error {
 		if c.Action == ActionDelete {
 			return roles.DeleteIamRole(c.Target.IamRole)
 		}
-		return roles.PutIamRole(c.Target.IamRole)
+		return showID(c)(roles.PutIamRole(c.Target.IamRole))
 	case TargetBucket:
 		storage, ok := provider.(StorageProvider)
 		if !ok {
@@ -731,7 +744,7 @@ func applyChange(provider LiveProvider, c *Change, options *Options) error {
 		if c.Action == ActionDelete {
 			return network.DeleteFirewall(c.Target.Firewall)
 		}
-		return network.PutFirewall(c.Target.Firewall)
+		return showID(c)(network.PutFirewall(c.Target.Firewall))
 	case TargetBudget:
 		monitoring, ok := provider.(MonitoringProvider)
 		if !ok {
@@ -755,7 +768,7 @@ func applyChange(provider LiveProvider, c *Change, options *Options) error {
 			return fmt.Errorf("reference %s is not resolved; apply its target first", pending[0])
 		}
 		check.Target = resolved[0]
-		return monitoring.PutHealthCheck(check)
+		return showID(c)(monitoring.PutHealthCheck(check))
 	case TargetInstance, TargetAddress:
 		compute, ok := provider.(ComputeProvider)
 		if !ok {
@@ -769,14 +782,20 @@ func applyChange(provider LiveProvider, c *Change, options *Options) error {
 			if err == nil {
 				outputs.Record("instance", c.Target.Instance.Name, "id", id)
 			}
-			return err
+			return showID(c)(id, err)
 		case c.Action == ActionDelete:
 			return compute.DeleteAddress(c.Target.Address)
 		default:
-			ip, err := compute.PutAddress(c.Target.Address)
+			id, ip, err := compute.PutAddress(c.Target.Address)
 			if err == nil && ip != "" {
 				c.Summary = "address " + ip
 				outputs.Record("staticAddress", c.Target.Address.Name, "publicIp", ip)
+			}
+			if err == nil && c.Action == ActionCreate && id != "" {
+				c.Summary = id
+				if ip != "" {
+					c.Summary += " address " + ip
+				}
 			}
 			return err
 		}
@@ -807,11 +826,11 @@ func applyChange(provider LiveProvider, c *Change, options *Options) error {
 		case c.Target.Kind == TargetGroup && c.Action == ActionDelete:
 			return identity.DeleteGroup(c.Target.Group.Name)
 		case c.Target.Kind == TargetGroup:
-			return identity.PutGroup(c.Target.Group)
+			return showID(c)(identity.PutGroup(c.Target.Group))
 		case c.Action == ActionDelete:
 			return identity.DeleteApp(c.Target.App.Tenant, c.Target.App.Name)
 		default:
-			return identity.PutApp(c.Target.App)
+			return showID(c)(identity.PutApp(c.Target.App))
 		}
 	case TargetAppSecret:
 		identity, ok := provider.(IdentityProvider)
